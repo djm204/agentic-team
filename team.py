@@ -417,7 +417,7 @@ class ProjectCreationTeam:
                 self.notification_manager.notify(
                     NotificationType.TECHNICAL_HURDLE,
                     hurdle.to_dict(),
-                    require_approval=True
+                    require_approval=not self.auto_approve
                 )
         
         # Notify plan completion and request approval
@@ -425,10 +425,10 @@ class ProjectCreationTeam:
         approved = self.notification_manager.notify(
             NotificationType.PLAN_COMPLETE,
             {"plan": plan, "hurdles": [h.to_dict() for h in plan_hurdles]},
-            require_approval=True
+            require_approval=not self.auto_approve
         )
         
-        if not approved:
+        if not approved and not self.auto_approve:
             approval = self.notification_manager.request_approval(
                 ApprovalCheckpoint.PLAN_APPROVAL,
                 {"plan": plan, "auto_approve": self.auto_approve}
@@ -515,7 +515,7 @@ class ProjectCreationTeam:
                 self.notification_manager.notify(
                     NotificationType.TECHNICAL_HURDLE,
                     hurdle.to_dict(),
-                    require_approval=True
+                    require_approval=not self.auto_approve
                 )
         
         # Calculate implementation stats
@@ -532,10 +532,10 @@ class ProjectCreationTeam:
                 "loc": loc_estimate,
                 "hurdles": [h.to_dict() for h in impl_hurdles]
             },
-            require_approval=True
+            require_approval=not self.auto_approve
         )
         
-        if not approved:
+        if not approved and not self.auto_approve:
             approval = self.notification_manager.request_approval(
                 ApprovalCheckpoint.IMPLEMENTATION_APPROVAL,
                 {
@@ -734,22 +734,22 @@ class ProjectCreationTeam:
         if write_files:
             print("\n📁 Writing files to disk...")
             try:
-                # If creating a PR, write files to the repo_path to ensure they can be committed
-                if create_pr and self.github_manager and self.repo_path:
-                    if final_write_path == "." or final_write_path == "./":
-                        write_path = self.repo_path if self.repo_path != "." else os.getcwd()
-                    else:
-                        # If output_dir is specified and different from repo_path, use repo_path for PR
-                        write_path = self.repo_path if self.repo_path != "." else final_write_path
-                    print(f"   Writing to repository directory: {os.path.abspath(write_path)}")
+                # Always respect the output_dir/final_write_path - don't override with repo_path
+                # Convert relative paths to absolute
+                if final_write_path == "." or final_write_path == "./":
+                    write_path = os.getcwd()
+                    print(f"   Writing to current directory: {os.path.abspath(write_path)}")
                 else:
-                    # Use the determined write path (final_write_path was set during analysis or defaults to output_dir)
-                    if final_write_path == "." or final_write_path == "./":
-                        write_path = os.getcwd()
-                        print(f"   Writing to current directory: {os.path.abspath(write_path)}")
+                    # Handle relative paths like "../guardian_proxy_v1"
+                    if not os.path.isabs(final_write_path):
+                        # Make it relative to current working directory
+                        write_path = os.path.abspath(final_write_path)
                     else:
                         write_path = final_write_path
-                        print(f"   Writing to: {os.path.abspath(write_path)}")
+                    print(f"   Writing to: {os.path.abspath(write_path)}")
+                
+                # Ensure the directory exists
+                os.makedirs(write_path, exist_ok=True)
                 
                 # Write files from implementation (development phase)
                 impl_files = write_files_from_implementation(implementation, write_path)
