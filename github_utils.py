@@ -159,6 +159,134 @@ class GitHubManager:
         
         return self.repo.get_pull(pr_number)
     
+    def add_pr_comment(self, pr_number: int, comment: str, agent_name: str = None):
+        """
+        Add a comment to a pull request.
+        
+        Args:
+            pr_number: Pull request number
+            comment: Comment text
+            agent_name: Optional agent name to identify the comment author
+        
+        Returns:
+            Created comment object
+        """
+        if not self.repo:
+            raise ValueError("Repository not set. Use set_repository() first.")
+        
+        pr = self.repo.get_pull(pr_number)
+        
+        # Format comment with agent identification if provided
+        if agent_name:
+            formatted_comment = f"**Comment from {agent_name}:**\n\n{comment}"
+        else:
+            formatted_comment = comment
+        
+        issue_comment = pr.create_issue_comment(formatted_comment)
+        print(f"Added comment to PR #{pr_number} from {agent_name or 'anonymous'}")
+        return issue_comment
+    
+    def get_pr_comments(self, pr_number: int):
+        """
+        Get all comments on a pull request.
+        
+        Args:
+            pr_number: Pull request number
+        
+        Returns:
+            List of comment objects
+        """
+        if not self.repo:
+            raise ValueError("Repository not set. Use set_repository() first.")
+        
+        pr = self.repo.get_pull(pr_number)
+        return list(pr.get_issue_comments())
+    
+    def get_pr_review_comments(self, pr_number: int):
+        """
+        Get all review comments (line-by-line comments) on a pull request.
+        
+        Args:
+            pr_number: Pull request number
+        
+        Returns:
+            List of review comment objects
+        """
+        if not self.repo:
+            raise ValueError("Repository not set. Use set_repository() first.")
+        
+        pr = self.repo.get_pull(pr_number)
+        return list(pr.get_review_comments())
+    
+    def has_unresolved_feedback(self, pr_number: int):
+        """
+        Check if a PR has unresolved feedback (comments that haven't been addressed).
+        
+        This checks for:
+        - Comments containing keywords like "fix", "change", "update", "issue", "problem"
+        - Review comments that are not resolved
+        - Comments from agents (identified by "Comment from" prefix)
+        
+        Args:
+            pr_number: Pull request number
+        
+        Returns:
+            Tuple of (has_unresolved: bool, unresolved_count: int, unresolved_comments: list)
+        """
+        if not self.repo:
+            raise ValueError("Repository not set. Use set_repository() first.")
+        
+        pr = self.repo.get_pull(pr_number)
+        
+        # Keywords that indicate feedback requiring action
+        action_keywords = [
+            "fix", "change", "update", "modify", "improve", "refactor",
+            "issue", "problem", "error", "bug", "concern", "suggestion",
+            "should", "must", "need", "required", "missing", "incorrect"
+        ]
+        
+        unresolved_comments = []
+        
+        # Check regular comments
+        for comment in pr.get_issue_comments():
+            comment_body = comment.body.lower()
+            # Check if comment contains action keywords (but not "fixed", "updated", etc. - past tense)
+            has_action = any(keyword in comment_body for keyword in action_keywords)
+            # Check if it's from an agent (has "Comment from" prefix)
+            is_agent_comment = "comment from" in comment_body
+            # Don't count if comment says "looks good", "approved", "resolved", etc.
+            is_resolved = any(resolved_word in comment_body for resolved_word in [
+                "looks good", "approved", "resolved", "fixed", "addressed", 
+                "completed", "done", "lgtm", "no issues"
+            ])
+            
+            if (has_action or is_agent_comment) and not is_resolved:
+                unresolved_comments.append({
+                    "id": comment.id,
+                    "body": comment.body,
+                    "author": comment.user.login,
+                    "created_at": comment.created_at,
+                    "type": "comment"
+                })
+        
+        # Check review comments (line-by-line)
+        for review_comment in pr.get_review_comments():
+            if not review_comment.in_reply_to_id:  # Only top-level comments
+                unresolved_comments.append({
+                    "id": review_comment.id,
+                    "body": review_comment.body,
+                    "author": review_comment.user.login,
+                    "created_at": review_comment.created_at,
+                    "path": review_comment.path,
+                    "line": review_comment.line,
+                    "type": "review_comment"
+                })
+        
+        unresolved_count = len(unresolved_comments)
+        has_unresolved = unresolved_count > 0
+        
+        return has_unresolved, unresolved_count, unresolved_comments
+    
     def create_repository(
         self,
         repo_name: str,

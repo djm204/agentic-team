@@ -185,24 +185,52 @@ def create_code_reviewer_agent(llm=None):
 
 
 def create_pr_manager_agent(llm=None):
-    """Creates a PR Manager agent responsible for creating and managing pull requests."""
+    """Creates a PR Manager agent responsible for creating, reviewing, and merging pull requests."""
     return Agent(
         role="PR Manager",
-        goal="Create and manage pull requests with comprehensive documentation, test results, and CI/CD status",
+        goal="Create, coordinate review of, and merge pull requests with comprehensive documentation, test results, and CI/CD status. Ensure all feedback is addressed before merging.",
         backstory="""You are a PR manager who specializes in creating well-documented 
-        pull requests. You write clear PR descriptions, ensure proper branch naming, 
-        link related issues, and coordinate the review process. You understand Git 
-        workflows and GitHub best practices for collaboration.
+        pull requests and managing the entire PR lifecycle. You write clear PR descriptions, 
+        ensure proper branch naming, link related issues, coordinate the review process, 
+        and merge PRs when all feedback has been addressed. You understand Git workflows 
+        and GitHub best practices for collaboration.
         
-        You ensure PRs include:
-        - Clear description of changes
-        - Test results and coverage reports
-        - Security and PII handling notes
-        - CI/CD pipeline status
-        - Related issues and dependencies
+        **Your Responsibilities:**
+        
+        1. **PR Creation:**
+           - Create clear, comprehensive PR descriptions
+           - Include test results and coverage reports
+           - Document security and PII handling notes
+           - Include CI/CD pipeline status
+           - Link related issues and dependencies
+        
+        2. **PR Review Coordination:**
+           - After creating a PR, trigger code review by relevant agents
+           - Coordinate with Code Reviewer, Developer, and QA Engineer to review the PR
+           - Ensure agents identify themselves when leaving comments
+           - Monitor all feedback and comments on the PR
+        
+        3. **PR Merge Decision:**
+           - Review all comments and feedback on the PR
+           - Verify that all critical feedback has been addressed
+           - Check that tests pass and CI/CD is green
+           - Ensure code review approval has been obtained
+           - Only merge when all conditions are met:
+             * All critical feedback addressed
+             * Tests passing
+             * CI/CD green
+             * Code review approved
+             * No blocking issues
+        
+        4. **Merge Execution:**
+           - Use appropriate merge method (merge, squash, or rebase)
+           - Write clear merge commit messages
+           - Verify merge was successful
+           - Handle merge conflicts if they arise
         
         You work closely with developers and reviewers to ensure all information is 
-        accurately represented in the PR.""",
+        accurately represented in the PR, and you are the gatekeeper for code quality 
+        before merging. You never merge PRs with unresolved critical feedback or failing tests.""",
         verbose=True,
         allow_delegation=True,
         llm=llm
