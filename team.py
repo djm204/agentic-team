@@ -521,12 +521,15 @@ pytest || exit 1
                 },
                 "agent_count": 5
             }
-        task_type = allocation["task_type"]
-        required_agents = allocation["required_agents"]
-        required_phases = allocation["required_phases"]
-        agent_count = allocation["agent_count"]
+        task_type = allocation.get("task_type")
+        required_agents = allocation.get("required_agents", {})
+        required_phases = allocation.get("required_phases", {})
+        agent_count = allocation.get("agent_count", 5)
         
-        print(f"   Task Type: {task_type.value}")
+        if task_type and hasattr(task_type, 'value'):
+            print(f"   Task Type: {task_type.value}")
+        else:
+            print(f"   Task Type: Full Project")
         print(f"   Required Agents: {agent_count}")
         active_agent_names = [name for name, required in required_agents.items() if required]
         print(f"   Agents: {', '.join(active_agent_names) if active_agent_names else 'None'}")
