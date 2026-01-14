@@ -59,11 +59,16 @@ cp .env.example .env
 Edit `.env` and add your credentials:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-GITHUB_TOKEN=your_github_personal_access_token_here
-GITHUB_REPO_OWNER=your_username
-GITHUB_REPO_NAME=your_repo_name
+GITHUB_TOKEN=your_github_personal_access_token_here  # Optional: only needed for GitHub operations
 DISCORD_WEBHOOK_URL=your_discord_webhook_url_here  # Optional: for real-time updates
 ```
+
+> CrewAI is **optional** for tests/CI. To run the full agent workflow locally, install the optional dependencies:
+> ```bash
+> pip install -r requirements-optional.txt
+> ```
+
+**Note:** Repository name and owner are now specified in the manifesto (see "Providing the Manifesto" section below). If not specified, the system will initialize a local git repository automatically.
 
 ### Discord Setup (Optional but Recommended)
 
@@ -100,6 +105,45 @@ You'll receive real-time updates in Discord for:
 
 ## Usage
 
+### Quick Start: Running the App
+
+**1. Create a manifesto file** (optional, or use the example):
+```bash
+# Create a file with your project description
+cat > manifesto.txt << EOF
+Create a Python REST API with FastAPI that handles user authentication
+and provides CRUD operations for a blog post system.
+
+Requirements:
+- JWT authentication
+- User registration and login
+- Blog post CRUD operations
+- SQLite database
+- Unit tests with >80% coverage
+EOF
+```
+
+**2. Run with a manifesto file:**
+```bash
+python main.py manifesto.txt
+```
+
+**3. Run with the example manifesto:**
+```bash
+python main.py
+```
+
+**4. Or use it programmatically:**
+```python
+from main import load_manifesto, main
+
+# Load your manifesto
+manifesto = load_manifesto("manifesto.txt")
+
+# Run the main function
+main(manifesto_file="manifesto.txt")
+```
+
 ### Basic Usage
 
 ```python
@@ -111,9 +155,9 @@ def notification_callback(notification_type, data):
     print(f"Notification: {notification_type.value}")
 
 team = ProjectCreationTeam(
-    github_token="your_token",
-    github_owner="your_username",
-    github_repo="your_repo",
+    github_token="your_token",  # Optional: only needed for GitHub operations
+    github_owner=None,  # Will be parsed from manifesto or use authenticated user
+    github_repo=None,  # Will be parsed from manifesto or created if needed
     notification_callback=notification_callback,
     auto_approve=False,  # Set True for automated workflows
     discord_webhook_url="your_discord_webhook_url",  # Optional: for real-time Discord updates
@@ -138,6 +182,78 @@ result = team.create_project_from_manifesto(
 print(f"PR created: {result['pr']['url']}")
 print(f"Files created: {len(result['files_created'])}")
 print(f"Tests passed: {result['tests_passed']}")
+```
+
+### Providing the Manifesto
+
+The manifesto can be provided in several ways. You can also specify the output directory and repository information directly in the manifesto:
+
+**Specifying repository in manifesto:**
+```
+Create a Python REST API with FastAPI.
+
+github_repo: my-api-project
+github_owner: myusername
+```
+
+**Specifying output directory in manifesto:**
+```
+Add unit tests to this project with 80% code coverage.
+output_dir: ./
+```
+
+**If no repository is specified:**
+- The system will automatically initialize a local git repository
+- If `GITHUB_TOKEN` is set and `create_pr=True`, it will create a GitHub repository automatically
+- Repository name will be generated from the manifesto (or use "new-project" as default)
+
+The system will automatically:
+- Parse `github_repo: repo_name` (or `repo: repo_name`, `repository: repo_name`) from the manifesto
+- Parse `github_owner: owner` (or `owner: owner`) from the manifesto
+- Parse `output_dir: ./` (or `output_dir: .`, `output directory: ./`, etc.) from the manifesto
+- Use the current directory instead of creating a new one if `output_dir: ./` is specified
+- Auto-enable `write_files` if output_dir is specified
+
+**Other ways to provide the manifesto:**
+
+**1. As a string variable:**
+```python
+manifesto = """
+Create a Python REST API with FastAPI that handles user authentication
+and provides CRUD operations for a blog post system.
+"""
+```
+
+**2. From a file:**
+```python
+# Load from file
+with open("manifesto.txt", "r") as f:
+    manifesto = f.read()
+
+result = team.create_project_from_manifesto(manifesto=manifesto)
+```
+
+**3. Using the helper function (see `main.py`):**
+```python
+from main import load_manifesto
+
+# Load from file or use default example
+manifesto = load_manifesto("manifesto.txt")  # or load_manifesto() for example
+result = team.create_project_from_manifesto(manifesto=manifesto)
+```
+
+**4. From command-line:**
+```python
+import sys
+if len(sys.argv) > 1:
+    with open(sys.argv[1], "r") as f:
+        manifesto = f.read()
+```
+
+**5. From environment variable:**
+```python
+import os
+manifesto = os.getenv("PROJECT_MANIFESTO", "")
 ```
 
 ### Using Environment Variables
@@ -205,16 +321,43 @@ for pr in open_prs:
 - `OPENAI_API_KEY` (required): Your OpenAI API key for LLM operations
 - `OPENAI_MODEL` (optional): Model to use (default: "gpt-4")
 - `OPENAI_TEMPERATURE` (optional): Temperature setting (default: 0.7)
-- `GITHUB_TOKEN` (required for PR operations): GitHub personal access token
-- `GITHUB_REPO_OWNER` (required for PR operations): Repository owner
-- `GITHUB_REPO_NAME` (required for PR operations): Repository name
+- `GITHUB_TOKEN` (optional): GitHub personal access token - only needed for GitHub operations (creating repos, PRs, etc.)
+  - Repository name and owner should be specified in the manifesto (see "Providing the Manifesto" section)
+  - If not specified in manifesto and `GITHUB_TOKEN` is set, a repository will be created automatically
 
 ### GitHub Token Permissions
 
-Your GitHub personal access token needs the following permissions:
-- `repo` (Full control of private repositories)
-  - `public_repo` (if using public repos)
-  - `write:org` (if using organization repos)
+Your GitHub personal access token needs the following permissions to create branches, pull requests, and merge PRs:
+
+**For Classic Personal Access Tokens:**
+- ✅ **`repo`** (Full control of private repositories) - **REQUIRED**
+  - This includes all sub-permissions needed:
+    - `repo:status` - Read/write repository status
+    - `repo_deployment` - Read/write deployment status
+    - `public_repo` - Access public repositories (if using public repos)
+    - `repo:invite` - Access repository invitations
+    - `security_events` - Read/write security events
+
+**For Fine-Grained Personal Access Tokens (GitHub's newer token type):**
+- ✅ **Repository permissions:**
+  - **Contents**: Read and write (to create branches and files)
+  - **Pull requests**: Read and write (to create and merge PRs)
+  - **Metadata**: Read-only (to access repository info)
+  - **Actions**: Read-only (optional, if you want to check CI/CD status)
+
+**Additional permissions (if needed):**
+- `write:org` - Only if using organization repositories and need org-level permissions
+- `read:org` - Only if you need to read organization information
+
+**Minimum Required Scopes:**
+The token must have at minimum:
+- Read/write access to repository contents (to create branches)
+- Read/write access to pull requests (to create and merge PRs)
+
+**Note:** The 403 Forbidden error you saw earlier typically means:
+1. The token doesn't have `repo` scope (classic tokens) or Contents/Pull requests permissions (fine-grained)
+2. The token doesn't have access to the specific repository
+3. The repository requires branch protection rules that prevent direct pushes
 
 ## Project Structure
 
@@ -224,7 +367,7 @@ agentic-team/
 ├── tasks.py           # Task definitions
 ├── team.py            # Main team orchestration
 ├── github_utils.py    # GitHub integration utilities
-├── example.py         # Usage examples
+├── main.py            # Main entry point
 ├── requirements.txt   # Python dependencies
 └── README.md          # This file
 ```
