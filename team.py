@@ -33,6 +33,7 @@ from agents import (
 )
 from metrics_engine import MetricsEngine
 from codebase_analyzer import CodebaseAnalyzer
+from resource_allocator import ResourceAllocation, TaskType
 import os
 import json
 import re
@@ -162,13 +163,29 @@ class ProjectCreationTeam:
             )
         print("🚀 Starting project creation from manifesto...")
         
+        # Analyze manifesto to determine optimal resource allocation
+        print("\n🎯 Analyzing project requirements for optimal resource allocation...")
+        allocation = ResourceAllocation.analyze_and_allocate(manifesto, create_pr)
+        task_type = allocation["task_type"]
+        required_agents = allocation["required_agents"]
+        required_phases = allocation["required_phases"]
+        agent_count = allocation["agent_count"]
+        
+        print(f"   Task Type: {task_type.value}")
+        print(f"   Required Agents: {agent_count}")
+        active_agent_names = [name for name, required in required_agents.items() if required]
+        print(f"   Agents: {', '.join(active_agent_names) if active_agent_names else 'None'}")
+        active_phases = [phase for phase, required in required_phases.items() if required]
+        print(f"   Phases: {', '.join(active_phases) if active_phases else 'None'}")
+        print(f"   Resource Optimization: {'✅ Optimized' if agent_count < 5 else '⚠️ Full team'}")
+        
         # Send Discord notification for start
         if self.discord_streaming:
             self.discord_streaming.on_stage_start("Project Creation")
             from discord_integration import DiscordMessageType
             self.discord.send_message(
                 title="🚀 Project Creation Started",
-                description=f"Starting project creation from manifesto...\n\n**Manifesto Preview:**\n```\n{manifesto[:300]}\n```",
+                description=f"Starting project creation from manifesto...\n\n**Task Type:** {task_type.value}\n**Agents:** {', '.join(active_agent_names) if active_agent_names else 'None'}\n**Optimization:** {'✅ Optimized' if agent_count < 5 else '⚠️ Full team'}\n\n**Manifesto Preview:**\n```\n{manifesto[:300]}\n```",
                 message_type=DiscordMessageType.INFO
             )
         
@@ -370,364 +387,401 @@ class ProjectCreationTeam:
                 print(f"   Error details: {error_details[:500]}")
                 codebase_summary = f"Codebase analysis failed: {str(e)}. Proceed with standard implementation."
         
-        # Step 1: Planning
-        print("\n📋 Step 1: Creating development plan...")
-        if self.discord_streaming:
-            self.discord_streaming.on_stage_start("Planning Phase")
-            self.discord_streaming.on_agent_start("Project Manager", "Analyzing manifesto and creating development plan")
+        # Step 1: Planning (conditional)
+        plan = None
+        pm_record = None
         
-        # Include codebase summary in planning if available
-        planning_manifesto = manifesto
-        if codebase_summary and is_test_task:
-            planning_manifesto = f"{manifesto}\n\n**Existing Codebase Structure:**\n{codebase_summary}"
+        if required_phases["planning"]:
+            print("\n📋 Step 1: Creating development plan...")
+            if self.discord_streaming:
+                self.discord_streaming.on_stage_start("Planning Phase")
+                self.discord_streaming.on_agent_start("Project Manager", "Analyzing manifesto and creating development plan")
+            
+            # Include codebase summary in planning if available
+            planning_manifesto = manifesto
+            if codebase_summary and is_test_task:
+                planning_manifesto = f"{manifesto}\n\n**Existing Codebase Structure:**\n{codebase_summary}"
+            
+            planning_task = create_planning_task(planning_manifesto, self.context_manager)
+            pm_agent = planning_task.agent  # Get the Project Manager agent from the task
+            
+            # Create and register Project Manager agent record
+            pm_record = AgentRecord("Project Manager", pm_agent)
+            self.standup_manager.register_agent("Project Manager", pm_agent)
+            self.active_agents["Project Manager"] = pm_record
+            
+            planning_crew = Crew(
+                agents=[planning_task.agent],
+                tasks=[planning_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            
+            # Stream planning progress to Discord
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_progress("Project Manager", "Analyzing requirements and creating plan...")
+            
+            plan_result = planning_crew.kickoff()
+            plan = str(plan_result)
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_complete("Project Manager", f"Plan created: {len(plan)} characters")
+                self.discord_streaming.on_stage_complete("Planning Phase", "Development plan created successfully")
+            
+            # Detect technical hurdles in plan
+            print("\n🔍 Detecting technical hurdles in plan...")
+            plan_hurdles = self.hurdle_detector.detect_hurdles(plan, context="planning")
+            critical_hurdles = [h for h in plan_hurdles if should_escalate(h)]
+            
+            if critical_hurdles:
+                for hurdle in critical_hurdles:
+                    self.notification_manager.notify(
+                        NotificationType.TECHNICAL_HURDLE,
+                        hurdle.to_dict(),
+                        require_approval=True
+                    )
+            
+            # Notify plan completion and request approval
+            print("\n✅ Plan created!")
+            approved = self.notification_manager.notify(
+                NotificationType.PLAN_COMPLETE,
+                {"plan": plan, "hurdles": [h.to_dict() for h in plan_hurdles]},
+                require_approval=True
+            )
+            
+            if not approved:
+                approval = self.notification_manager.request_approval(
+                    ApprovalCheckpoint.PLAN_APPROVAL,
+                    {"plan": plan, "auto_approve": self.auto_approve}
+                )
+                if not approval:
+                    return {"error": "Plan approval rejected by user", "plan": plan}
+        else:
+            # Skip planning phase - use manifesto as plan for simple tasks
+            print("\n⏭️  Skipping planning phase (not required for this task type)")
+            plan = manifesto  # Use manifesto directly as plan for simple tasks
         
-        planning_task = create_planning_task(planning_manifesto, self.context_manager)
-        pm_agent = planning_task.agent  # Get the Project Manager agent from the task
+        # Step 2: Development (conditional)
+        implementation = None
+        dev_record = None
         
-        # Create and register Project Manager agent record
-        pm_record = AgentRecord("Project Manager", pm_agent)
-        self.standup_manager.register_agent("Project Manager", pm_agent)
-        self.active_agents["Project Manager"] = pm_record
-        
-        planning_crew = Crew(
-            agents=[planning_task.agent],
-            tasks=[planning_task],
-            process=Process.sequential,
-            verbose=True
-        )
-        
-        # Stream planning progress to Discord
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_progress("Project Manager", "Analyzing requirements and creating plan...")
-        
-        plan_result = planning_crew.kickoff()
-        plan = str(plan_result)
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_complete("Project Manager", f"Plan created: {len(plan)} characters")
-            self.discord_streaming.on_stage_complete("Planning Phase", "Development plan created successfully")
-        
-        # Detect technical hurdles in plan
-        print("\n🔍 Detecting technical hurdles in plan...")
-        plan_hurdles = self.hurdle_detector.detect_hurdles(plan, context="planning")
-        critical_hurdles = [h for h in plan_hurdles if should_escalate(h)]
-        
-        if critical_hurdles:
-            for hurdle in critical_hurdles:
-                self.notification_manager.notify(
-                    NotificationType.TECHNICAL_HURDLE,
-                    hurdle.to_dict(),
-                    require_approval=True
+        if required_phases["development"]:
+            print("\n💻 Step 2: Implementing project...")
+            
+            # Create and register Developer agent
+            developer_agent = create_developer_agent(get_llm())
+            dev_record = AgentRecord("Senior Software Developer", developer_agent)
+            self.standup_manager.register_agent("Senior Software Developer", developer_agent)
+            self.active_agents["Senior Software Developer"] = dev_record
+            
+            # Conduct standup with available agents
+            standup_agents = [pm_record] if pm_record else []
+            standup_agents.append(dev_record)
+            if standup_agents:
+                self.standup_manager.conduct_standup(
+                    standup_agents,
+                    context="Development phase standup - Developer needs plan clarification"
+                )
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_stage_start("Development Phase")
+                self.discord_streaming.on_agent_start("Senior Software Developer", "Implementing project based on plan")
+                self.discord_streaming.log_agent_action(
+                    "Senior Software Developer", "COLLABORATION", "Consulting with Project Manager",
+                    {"collaboration_type": "standup", "participants": ["Project Manager", "Developer"] if pm_record else ["Developer"]}
                 )
         
-        # Notify plan completion and request approval
-        print("\n✅ Plan created!")
-        approved = self.notification_manager.notify(
-            NotificationType.PLAN_COMPLETE,
-            {"plan": plan, "hurdles": [h.to_dict() for h in plan_hurdles]},
-            require_approval=True
-        )
-        
-        if not approved:
-            approval = self.notification_manager.request_approval(
-                ApprovalCheckpoint.PLAN_APPROVAL,
-                {"plan": plan, "auto_approve": self.auto_approve}
+            development_task = create_development_task(plan, self.context_manager, codebase_summary=codebase_summary)
+            development_task.agent = developer_agent  # Use registered agent
+            development_crew = Crew(
+                agents=[development_task.agent],
+                tasks=[development_task],
+                process=Process.sequential,
+                verbose=True
             )
-            if not approval:
-                return {"error": "Plan approval rejected by user", "plan": plan}
-        
-        # Conduct standup before development
-        print("\n🤝 Conducting standup before development...")
-        standup_agents = [pm_record]
-        standup_result = self.standup_manager.conduct_standup(
-            standup_agents,
-            context="Pre-development standup to align on plan"
-        )
-        
-        # Step 2: Development
-        print("\n💻 Step 2: Implementing project...")
-        
-        # Create and register Developer agent
-        developer_agent = create_developer_agent(get_llm())
-        dev_record = AgentRecord("Senior Software Developer", developer_agent)
-        self.standup_manager.register_agent("Senior Software Developer", developer_agent)
-        self.active_agents["Senior Software Developer"] = dev_record
-        
-        # Conduct standup with both agents
-        standup_agents = [pm_record, dev_record]
-        self.standup_manager.conduct_standup(
-            standup_agents,
-            context="Development phase standup - Developer needs plan clarification"
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_stage_start("Development Phase")
-            self.discord_streaming.on_agent_start("Senior Software Developer", "Implementing project based on plan")
-            self.discord_streaming.log_agent_action(
-                "Senior Software Developer", "COLLABORATION", "Consulting with Project Manager",
-                {"collaboration_type": "standup", "participants": ["Project Manager", "Developer"]}
-            )
-        
-        development_task = create_development_task(plan, self.context_manager, codebase_summary=codebase_summary)
-        development_task.agent = developer_agent  # Use registered agent
-        development_crew = Crew(
-            agents=[development_task.agent],
-            tasks=[development_task],
-            process=Process.sequential,
-            verbose=True
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_progress("Senior Software Developer", "Writing code, implementing features, adding tests...")
-            self.discord_streaming.log_agent_action(
-                "Senior Software Developer", "PROGRESS", "Writing code",
-                {"progress": "Implementing features, writing tests, adding CI/CD config"}
-            )
-        
-        implementation_result = development_crew.kickoff()
-        implementation = str(implementation_result)
-        
-        if self.discord_streaming:
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_progress("Senior Software Developer", "Writing code, implementing features, adding tests...")
+                self.discord_streaming.log_agent_action(
+                    "Senior Software Developer", "PROGRESS", "Writing code",
+                    {"progress": "Implementing features, writing tests, adding CI/CD config"}
+                )
+            
+            implementation_result = development_crew.kickoff()
+            implementation = str(implementation_result)
+            
+            if self.discord_streaming:
+                file_count = len(re.findall(r'```\w*:?([^\n]+)', implementation))
+                self.discord_streaming.on_agent_complete("Senior Software Developer", f"Implementation complete: {file_count} files")
+                self.discord_streaming.log_agent_action(
+                    "Senior Software Developer", "COMPLETE", "Implementation complete",
+                    {"files_created": file_count, "result": "All code written and tested"}
+                )
+                self.discord_streaming.on_stage_complete("Development Phase", f"Implementation complete with {file_count} files")
+            
+            # Peer review: Project Manager reviews Developer's work (if PM exists)
+            if pm_record:
+                print("\n📝 Project Manager reviewing Developer's work...")
+                self.peer_review_system.conduct_peer_review(
+                    reviewer_agent=pm_record,
+                    reviewed_agent=dev_record,
+                    work_product=implementation[:1000],
+                    context="Reviewing implementation against plan"
+                )
+            
+            # Detect technical hurdles in implementation
+            print("\n🔍 Detecting technical hurdles in implementation...")
+            impl_hurdles = self.hurdle_detector.detect_hurdles(implementation, context="implementation")
+            critical_impl_hurdles = [h for h in impl_hurdles if should_escalate(h)]
+            
+            if critical_impl_hurdles:
+                for hurdle in critical_impl_hurdles:
+                    self.notification_manager.notify(
+                        NotificationType.TECHNICAL_HURDLE,
+                        hurdle.to_dict(),
+                        require_approval=True
+                    )
+            
+            # Calculate implementation stats
             file_count = len(re.findall(r'```\w*:?([^\n]+)', implementation))
-            self.discord_streaming.on_agent_complete("Senior Software Developer", f"Implementation complete: {file_count} files")
-            self.discord_streaming.log_agent_action(
-                "Senior Software Developer", "COMPLETE", "Implementation complete",
-                {"files_created": file_count, "result": "All code written and tested"}
-            )
-            self.discord_streaming.on_stage_complete("Development Phase", f"Implementation complete with {file_count} files")
-        
-        # Peer review: Project Manager reviews Developer's work
-        print("\n📝 Project Manager reviewing Developer's work...")
-        self.peer_review_system.conduct_peer_review(
-            reviewer_agent=pm_record,
-            reviewed_agent=dev_record,
-            work_product=implementation[:1000],
-            context="Reviewing implementation against plan"
-        )
-        
-        # Detect technical hurdles in implementation
-        print("\n🔍 Detecting technical hurdles in implementation...")
-        impl_hurdles = self.hurdle_detector.detect_hurdles(implementation, context="implementation")
-        critical_impl_hurdles = [h for h in impl_hurdles if should_escalate(h)]
-        
-        if critical_impl_hurdles:
-            for hurdle in critical_impl_hurdles:
-                self.notification_manager.notify(
-                    NotificationType.TECHNICAL_HURDLE,
-                    hurdle.to_dict(),
-                    require_approval=True
-                )
-        
-        # Calculate implementation stats
-        file_count = len(re.findall(r'```\w*:?([^\n]+)', implementation))
-        loc_estimate = len(implementation.split('\n'))
-        
-        # Notify implementation completion and request approval
-        print("\n✅ Implementation complete!")
-        approved = self.notification_manager.notify(
-            NotificationType.IMPLEMENTATION_COMPLETE,
-            {
-                "summary": implementation[:500],
-                "file_count": file_count,
-                "loc": loc_estimate,
-                "hurdles": [h.to_dict() for h in impl_hurdles]
-            },
-            require_approval=True
-        )
-        
-        if not approved:
-            approval = self.notification_manager.request_approval(
-                ApprovalCheckpoint.IMPLEMENTATION_APPROVAL,
+            loc_estimate = len(implementation.split('\n'))
+            
+            # Notify implementation completion and request approval
+            print("\n✅ Implementation complete!")
+            approved = self.notification_manager.notify(
+                NotificationType.IMPLEMENTATION_COMPLETE,
                 {
                     "summary": implementation[:500],
                     "file_count": file_count,
                     "loc": loc_estimate,
-                    "auto_approve": self.auto_approve
-                }
+                    "hurdles": [h.to_dict() for h in impl_hurdles]
+                },
+                require_approval=True
             )
-            if not approval:
-                return {
-                    "error": "Implementation approval rejected by user",
-                    "plan": plan,
-                    "implementation": implementation
-                }
-        
-        # Step 3: Code Review
-        print("\n🔍 Step 3: Reviewing code...")
-        
-        # Create and register Code Reviewer agent
-        reviewer_agent = create_code_reviewer_agent(get_llm())
-        reviewer_record = AgentRecord("Code Reviewer", reviewer_agent)
-        self.standup_manager.register_agent("Code Reviewer", reviewer_agent)
-        self.active_agents["Code Reviewer"] = reviewer_record
-        
-        # Standup with all agents
-        standup_agents = [pm_record, dev_record, reviewer_record]
-        self.standup_manager.conduct_standup(
-            standup_agents,
-            context="Code review phase - Reviewer needs context from Developer"
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_stage_start("Code Review Phase")
-            self.discord_streaming.on_agent_start("Code Reviewer", "Reviewing code for quality, security, and compliance")
-            self.discord_streaming.log_agent_action(
-                "Code Reviewer", "START", "Beginning code review",
-                {"review_scope": "Security, PII, Testing, CI/CD"}
-            )
-        
-        review_task = create_review_task(implementation, plan, self.context_manager)
-        review_task.agent = reviewer_agent  # Use registered agent
-        review_crew = Crew(
-            agents=[review_task.agent],
-            tasks=[review_task],
-            process=Process.sequential,
-            verbose=True
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_progress("Code Reviewer", "Reviewing security, PII handling, testing, and CI/CD...")
-            self.discord_streaming.log_agent_action(
-                "Code Reviewer", "PROGRESS", "Analyzing code",
-                {"checks": ["Security", "PII compliance", "Test coverage", "CI/CD"]}
-            )
-        
-        review_result = review_crew.kickoff()
-        review = str(review_result)
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_complete("Code Reviewer", "Code review complete")
-            self.discord_streaming.log_agent_action(
-                "Code Reviewer", "COMPLETE", "Code review finished",
-                {"review_length": len(review), "result": "Review complete with feedback"}
-            )
-            self.discord_streaming.on_stage_complete("Code Review Phase", "Code review completed")
-        
-        print("\n✅ Code review complete!")
-        
-        # Peer review: Code Reviewer reviews Developer's work
-        print("\n📝 Code Reviewer providing peer feedback to Developer...")
-        self.peer_review_system.conduct_peer_review(
-            reviewer_agent=reviewer_record,
-            reviewed_agent=dev_record,
-            work_product=review[:1000],
-            context="Formal code review with feedback"
-        )
-        
-        # Extract code quality metrics from review
-        dry_violations = 0
-        complexity_score = 5.0
-        readability_score = 5.0
-        maintainability_score = 5.0
-        
-        # Try to parse metrics from review
-        if "DRY Violations Count:" in review:
-            try:
-                lines = review.split('\n')
-                for i, line in enumerate(lines):
-                    if "DRY Violations Count:" in line:
-                        dry_violations = int(re.search(r'\d+', line).group())
-                    elif "Complexity Score:" in line:
-                        match = re.search(r'(\d+(?:\.\d+)?)', line)
-                        if match:
-                            complexity_score = float(match.group())
-                    elif "Readability Score:" in line:
-                        match = re.search(r'(\d+(?:\.\d+)?)', line)
-                        if match:
-                            readability_score = float(match.group())
-                    elif "Maintainability Score:" in line:
-                        match = re.search(r'(\d+(?:\.\d+)?)', line)
-                        if match:
-                            maintainability_score = float(match.group())
-            except:
-                pass
-        
-        # Record code quality metrics
-        self.metrics_engine.record_code_quality(
-            "Senior Software Developer",
-            dry_violations=dry_violations,
-            complexity_score=complexity_score,
-            readability_score=readability_score,
-            maintainability_score=maintainability_score
-        )
-        
-        # Evaluate Developer performance
-        if self.agent_manager.evaluate_agent("Senior Software Developer", threshold=2.0):
-            print("⚠️ Developer performance below threshold - agent may be replaced")
-        
-        # Step 4: Testing
-        print("\n🧪 Step 4: Creating and running tests...")
-        
-        # Create and register QA Engineer agent
-        qa_agent = create_testing_agent(get_llm())
-        qa_record = AgentRecord("QA Engineer & Test Specialist", qa_agent)
-        self.standup_manager.register_agent("QA Engineer & Test Specialist", qa_agent)
-        self.active_agents["QA Engineer & Test Specialist"] = qa_record
-        
-        # Standup with Developer and QA
-        standup_agents = [dev_record, qa_record]
-        self.standup_manager.conduct_standup(
-            standup_agents,
-            context="Testing phase - QA needs to understand implementation"
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_stage_start("Testing Phase")
-            self.discord_streaming.on_agent_start("QA Engineer & Test Specialist", "Creating and running comprehensive test suite")
-            self.discord_streaming.log_agent_action(
-                "QA Engineer & Test Specialist", "COLLABORATION", "Consulting with Developer",
-                {"purpose": "Understanding implementation for test creation"}
-            )
-        
-        testing_task = create_testing_task(implementation, plan, self.context_manager, codebase_summary=codebase_summary)
-        testing_task.agent = qa_agent  # Use registered agent
-        testing_crew = Crew(
-            agents=[testing_task.agent],
-            tasks=[testing_task],
-            process=Process.sequential,
-            verbose=True
-        )
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_progress("QA Engineer & Test Specialist", "Writing tests, executing test suite...")
-            self.discord_streaming.log_agent_action(
-                "QA Engineer & Test Specialist", "PROGRESS", "Creating tests",
-                {"test_types": ["Unit", "Integration", "Security", "PII validation"]}
-            )
-        
-        test_result = testing_crew.kickoff()
-        test_results = str(test_result)
-        
-        if self.discord_streaming:
-            self.discord_streaming.on_agent_complete("QA Engineer & Test Specialist", "Test suite complete")
-            self.discord_streaming.log_agent_action(
-                "QA Engineer & Test Specialist", "COMPLETE", "Test suite finished",
-                {"test_results": test_results[:200]}
-            )
-            self.discord_streaming.on_stage_complete("Testing Phase", "Testing phase completed")
-        
-        # Peer review: QA reviews Developer's testability
-        self.peer_review_system.conduct_peer_review(
-            reviewer_agent=qa_record,
-            reviewed_agent=dev_record,
-            work_product=test_results[:1000],
-            context="Reviewing code testability and test coverage"
-        )
-        
-        # Parse test results
-        tests_passed = self._parse_test_results(test_results)
-        
-        if tests_passed:
-            self.notification_manager.notify(
-                NotificationType.TESTING_PASSED,
-                {"test_results": test_results}
-            )
+            
+            if not approved:
+                approval = self.notification_manager.request_approval(
+                    ApprovalCheckpoint.IMPLEMENTATION_APPROVAL,
+                    {
+                        "summary": implementation[:500],
+                        "file_count": file_count,
+                        "loc": loc_estimate,
+                        "auto_approve": self.auto_approve
+                    }
+                )
+                if not approval:
+                    return {
+                        "error": "Implementation approval rejected by user",
+                        "plan": plan,
+                        "implementation": implementation
+                    }
         else:
-            self.notification_manager.notify(
-                NotificationType.TESTING_FAILED,
-                {"test_results": test_results, "test_failures": "See test results above"}
+            # Skip development phase - use empty implementation or existing code
+            print("\n⏭️  Skipping development phase (not required for this task type)")
+            implementation = ""  # Will be populated by other phases if needed
+        
+        # Step 3: Code Review (conditional)
+        review = None
+        reviewer_record = None
+        
+        if required_phases["code_review"]:
+            print("\n🔍 Step 3: Reviewing code...")
+            
+            # Create and register Code Reviewer agent
+            reviewer_agent = create_code_reviewer_agent(get_llm())
+            reviewer_record = AgentRecord("Code Reviewer", reviewer_agent)
+            self.standup_manager.register_agent("Code Reviewer", reviewer_agent)
+            self.active_agents["Code Reviewer"] = reviewer_record
+            
+            # Standup with available agents
+            standup_agents = []
+            if pm_record:
+                standup_agents.append(pm_record)
+            if dev_record:
+                standup_agents.append(dev_record)
+            standup_agents.append(reviewer_record)
+            self.standup_manager.conduct_standup(
+                standup_agents,
+                context="Code review phase - Reviewer needs context from Developer"
             )
-            print("⚠️ Some tests failed. Review test results before proceeding.")
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_stage_start("Code Review Phase")
+                self.discord_streaming.on_agent_start("Code Reviewer", "Reviewing code for quality, security, and compliance")
+                self.discord_streaming.log_agent_action(
+                    "Code Reviewer", "START", "Beginning code review",
+                    {"review_scope": "Security, PII, Testing, CI/CD"}
+                )
+            
+            review_task = create_review_task(implementation, plan, self.context_manager)
+            review_task.agent = reviewer_agent  # Use registered agent
+            review_crew = Crew(
+                agents=[review_task.agent],
+                tasks=[review_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_progress("Code Reviewer", "Reviewing security, PII handling, testing, and CI/CD...")
+                self.discord_streaming.log_agent_action(
+                    "Code Reviewer", "PROGRESS", "Analyzing code",
+                    {"checks": ["Security", "PII compliance", "Test coverage", "CI/CD"]}
+                )
+            
+            review_result = review_crew.kickoff()
+            review = str(review_result)
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_complete("Code Reviewer", "Code review complete")
+                self.discord_streaming.log_agent_action(
+                    "Code Reviewer", "COMPLETE", "Code review finished",
+                    {"review_length": len(review), "result": "Review complete with feedback"}
+                )
+                self.discord_streaming.on_stage_complete("Code Review Phase", "Code review completed")
+            
+            print("\n✅ Code review complete!")
+            
+            # Peer review: Code Reviewer reviews Developer's work (if dev exists)
+            if dev_record:
+                print("\n📝 Code Reviewer providing peer feedback to Developer...")
+                self.peer_review_system.conduct_peer_review(
+                    reviewer_agent=reviewer_record,
+                    reviewed_agent=dev_record,
+                    work_product=review[:1000],
+                    context="Formal code review with feedback"
+                )
+            
+            # Extract code quality metrics from review
+            dry_violations = 0
+            complexity_score = 5.0
+            readability_score = 5.0
+            maintainability_score = 5.0
+            
+            # Try to parse metrics from review
+            if "DRY Violations Count:" in review:
+                try:
+                    lines = review.split('\n')
+                    for i, line in enumerate(lines):
+                        if "DRY Violations Count:" in line:
+                            dry_violations = int(re.search(r'\d+', line).group())
+                        elif "Complexity Score:" in line:
+                            match = re.search(r'(\d+(?:\.\d+)?)', line)
+                            if match:
+                                complexity_score = float(match.group())
+                        elif "Readability Score:" in line:
+                            match = re.search(r'(\d+(?:\.\d+)?)', line)
+                            if match:
+                                readability_score = float(match.group())
+                        elif "Maintainability Score:" in line:
+                            match = re.search(r'(\d+(?:\.\d+)?)', line)
+                            if match:
+                                maintainability_score = float(match.group())
+                except:
+                    pass
+            
+            # Record code quality metrics (if dev exists)
+            if dev_record:
+                self.metrics_engine.record_code_quality(
+                    "Senior Software Developer",
+                    dry_violations=dry_violations,
+                    complexity_score=complexity_score,
+                    readability_score=readability_score,
+                    maintainability_score=maintainability_score
+                )
+                
+                # Evaluate Developer performance
+                if self.agent_manager.evaluate_agent("Senior Software Developer", threshold=2.0):
+                    print("⚠️ Developer performance below threshold - agent may be replaced")
+        else:
+            # Skip code review phase
+            print("\n⏭️  Skipping code review phase (not required for this task type)")
+        
+        # Step 4: Testing (conditional)
+        test_results = None
+        qa_record = None
+        
+        if required_phases["testing"]:
+            print("\n🧪 Step 4: Creating and running tests...")
+            
+            # Create and register QA Engineer agent
+            qa_agent = create_testing_agent(get_llm())
+            qa_record = AgentRecord("QA Engineer & Test Specialist", qa_agent)
+            self.standup_manager.register_agent("QA Engineer & Test Specialist", qa_agent)
+            self.active_agents["QA Engineer & Test Specialist"] = qa_record
+            
+            # Standup with available agents
+            standup_agents = []
+            if dev_record:
+                standup_agents.append(dev_record)
+            standup_agents.append(qa_record)
+            self.standup_manager.conduct_standup(
+                standup_agents,
+                context="Testing phase - QA needs to understand implementation"
+            )
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_stage_start("Testing Phase")
+                self.discord_streaming.on_agent_start("QA Engineer & Test Specialist", "Creating and running comprehensive test suite")
+                self.discord_streaming.log_agent_action(
+                    "QA Engineer & Test Specialist", "COLLABORATION", "Consulting with Developer",
+                    {"purpose": "Understanding implementation for test creation"}
+                )
+            
+            testing_task = create_testing_task(implementation, plan, self.context_manager, codebase_summary=codebase_summary)
+            testing_task.agent = qa_agent  # Use registered agent
+            testing_crew = Crew(
+                agents=[testing_task.agent],
+                tasks=[testing_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_progress("QA Engineer & Test Specialist", "Writing tests, executing test suite...")
+                self.discord_streaming.log_agent_action(
+                    "QA Engineer & Test Specialist", "PROGRESS", "Creating tests",
+                    {"test_types": ["Unit", "Integration", "Security", "PII validation"]}
+                )
+            
+            test_result = testing_crew.kickoff()
+            test_results = str(test_result)
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_complete("QA Engineer & Test Specialist", "Test suite complete")
+                self.discord_streaming.log_agent_action(
+                    "QA Engineer & Test Specialist", "COMPLETE", "Test suite finished",
+                    {"test_results": test_results[:200]}
+                )
+                self.discord_streaming.on_stage_complete("Testing Phase", "Testing phase completed")
+            
+            # Peer review: QA reviews Developer's testability (if dev exists)
+            if dev_record:
+                self.peer_review_system.conduct_peer_review(
+                    reviewer_agent=qa_record,
+                    reviewed_agent=dev_record,
+                    work_product=test_results[:1000],
+                    context="Reviewing code testability and test coverage"
+                )
+            
+            # Parse test results
+            tests_passed = self._parse_test_results(test_results)
+            
+            if tests_passed:
+                self.notification_manager.notify(
+                    NotificationType.TESTING_PASSED,
+                    {"test_results": test_results}
+                )
+            else:
+                self.notification_manager.notify(
+                    NotificationType.TESTING_FAILED,
+                    {"test_results": test_results, "test_failures": "See test results above"}
+                )
+                print("⚠️ Some tests failed. Review test results before proceeding.")
+        else:
+            # Skip testing phase
+            print("\n⏭️  Skipping testing phase (not required for this task type)")
+            tests_passed = True  # Default to passed if no testing
         
         # Optional: Write files to disk
         created_files = []
@@ -780,12 +834,22 @@ class ProjectCreationTeam:
             self.standup_manager.register_agent("PR Manager", pr_agent)
             self.active_agents["PR Manager"] = pr_record
             
-            # Final standup with all agents
-            all_agents = [pm_record, dev_record, reviewer_record, qa_record, pr_record]
-            self.standup_manager.conduct_standup(
-                all_agents,
-                context="Final standup before PR creation - all agents align"
-            )
+            # Final standup with all active agents
+            all_agents = []
+            if pm_record:
+                all_agents.append(pm_record)
+            if dev_record:
+                all_agents.append(dev_record)
+            if reviewer_record:
+                all_agents.append(reviewer_record)
+            if qa_record:
+                all_agents.append(qa_record)
+            all_agents.append(pr_record)
+            if all_agents:
+                self.standup_manager.conduct_standup(
+                    all_agents,
+                    context="Final standup before PR creation - all agents align"
+                )
             
             if self.discord_streaming:
                 self.discord_streaming.on_stage_start("PR Creation Phase")
@@ -824,7 +888,10 @@ class ProjectCreationTeam:
                     {"sources": ["Code review", "Test results", "Implementation"]}
                 )
             
-            pr_task = create_pr_creation_task(review, test_results, branch, self.context_manager)
+            # Use available review and test results (may be None if phases were skipped)
+            pr_review = review if review else "No code review performed (phase skipped)"
+            pr_test_results = test_results if test_results else "No testing performed (phase skipped)"
+            pr_task = create_pr_creation_task(pr_review, pr_test_results, branch, self.context_manager)
             pr_task.agent = pr_agent  # Use registered agent
             pr_crew = Crew(
                 agents=[pr_task.agent],
@@ -844,13 +911,14 @@ class ProjectCreationTeam:
             
             # Final peer reviews
             print("\n📝 Conducting final peer reviews...")
-            # PR Manager reviews all agents' collaboration
-            self.peer_review_system.conduct_peer_review(
-                reviewer_agent=pr_record,
-                reviewed_agent=dev_record,
-                work_product=pr_data[:1000],
-                context="Final review of overall project quality"
-            )
+            # PR Manager reviews all agents' collaboration (if dev exists)
+            if dev_record:
+                self.peer_review_system.conduct_peer_review(
+                    reviewer_agent=pr_record,
+                    reviewed_agent=dev_record,
+                    work_product=pr_data[:1000],
+                    context="Final review of overall project quality"
+                )
             
             # Evaluate all agents
             print("\n📊 Evaluating agent performance...")
