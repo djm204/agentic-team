@@ -1,0 +1,5 @@
+# Optional dependencies for full agentic workflow
+# These are not required for running tests in CI.
+# Install manually if you need the full agent orchestration.
+crewai==0.1.7
+crewai[tools]==0.1.7
