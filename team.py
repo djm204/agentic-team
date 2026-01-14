@@ -1482,7 +1482,6 @@ pytest || exit 1
                         )
                         
                         # Execute review
-                        from crewai import Crew, Process
                         review_crew = Crew(
                             agents=[agent_record.agent],
                             tasks=[pr_review_task],
