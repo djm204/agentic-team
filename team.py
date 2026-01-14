@@ -108,15 +108,22 @@ class ProjectCreationTeam:
         except:
             self.token_encoding = tiktoken.get_encoding("cl100k_base")
         
+        # Store initial values, but repo name will be parsed from manifesto
+        self.github_repo = github_repo
+        self.github_owner = github_owner
+        
+        # Initialize GitHub manager only if token is provided
+        # Repo name will be set later from manifesto or created if needed
         if github_token or os.getenv("GITHUB_TOKEN"):
             try:
                 self.github_manager = GitHubManager(
-                    token=github_token,
-                    owner=github_owner,
-                    repo_name=github_repo
+                    token=github_token or os.getenv("GITHUB_TOKEN"),
+                    owner=github_owner,  # May be None, will be set from manifesto or authenticated user
+                    repo_name=None  # Will be set from manifesto or created
                 )
             except Exception as e:
                 print(f"Warning: GitHub integration not available: {e}")
+                self.github_manager = None
     
     def create_project_from_manifesto(
         self,
@@ -224,9 +231,9 @@ class ProjectCreationTeam:
             self.github_owner = parsed_github_owner
             print(f"👤 GitHub owner specified in manifesto: {parsed_github_owner}")
         
-        # If repo is not provided, initialize git and create a new repo
-        if create_pr and not self.github_repo:
-            print("\n📦 No GitHub repository specified. Initializing git and creating a new repository...")
+        # If repo is not provided, initialize git locally (and optionally create GitHub repo)
+        if not self.github_repo:
+            print("\n📦 No GitHub repository specified in manifesto. Initializing local git repository...")
             
             # Initialize local git repo if needed
             if self.git_manager.repo is None:
@@ -244,8 +251,8 @@ class ProjectCreationTeam:
                     repo_name = "new-project"
                 print(f"   Generated repository name: {repo_name}")
             
-            # Create GitHub repository if we have a token
-            if self.github_manager and self.github_manager.token:
+            # Create GitHub repository if we have a token AND create_pr is True
+            if create_pr and self.github_manager and self.github_manager.token:
                 try:
                     # Get owner from parsed value or authenticated user
                     owner = parsed_github_owner
@@ -287,9 +294,12 @@ class ProjectCreationTeam:
                 except Exception as e:
                     print(f"   ⚠️ Could not create GitHub repository: {e}")
                     print(f"   Continuing with local git repository only...")
+            elif create_pr:
+                print(f"   ℹ️  No GitHub token available. Using local git repository only.")
+                print(f"   Set GITHUB_TOKEN in environment to create a GitHub repository automatically.")
             else:
-                print(f"   ⚠️ No GitHub token available. Using local git repository only.")
-                print(f"   Set GITHUB_TOKEN to create a GitHub repository automatically.")
+                print(f"   ℹ️  Using local git repository only (create_pr=False).")
+                print(f"   Set create_pr=True and GITHUB_TOKEN to create a GitHub repository automatically.")
         
         # Analyze existing codebase if this is a test generation or enhancement task
         codebase_summary = None

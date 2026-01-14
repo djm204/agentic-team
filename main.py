@@ -71,9 +71,9 @@ def main(manifesto_file: str = None, auto_approve: bool = False):
         # You can add custom logic here (email, Slack, etc.)
     
     team = ProjectCreationTeam(
-        github_token=os.getenv("GITHUB_TOKEN"),
-        github_owner=os.getenv("GITHUB_REPO_OWNER"),
-        github_repo=os.getenv("GITHUB_REPO_NAME"),
+        github_token=os.getenv("GITHUB_TOKEN"),  # Optional: only needed for GitHub operations
+        github_owner=None,  # Will be parsed from manifesto or use authenticated user
+        github_repo=None,  # Will be parsed from manifesto or created if needed
         repo_path=".",
         notification_callback=notification_callback,
         auto_approve=auto_approve,  # Use the passed parameter
@@ -127,8 +127,8 @@ def example_create_pr_only():
     """Example: Create a PR without full project creation."""
     team = ProjectCreationTeam(
         github_token=os.getenv("GITHUB_TOKEN"),
-        github_owner=os.getenv("GITHUB_REPO_OWNER"),
-        github_repo=os.getenv("GITHUB_REPO_NAME")
+        github_owner=None,  # Will be parsed from manifesto
+        github_repo=None  # Will be parsed from manifesto
     )
     
     # Create a PR directly
@@ -147,8 +147,8 @@ def example_merge_pr():
     """Example: Merge an existing PR."""
     team = ProjectCreationTeam(
         github_token=os.getenv("GITHUB_TOKEN"),
-        github_owner=os.getenv("GITHUB_REPO_OWNER"),
-        github_repo=os.getenv("GITHUB_REPO_NAME")
+        github_owner=None,  # Will be parsed from manifesto
+        github_repo=None  # Will be parsed from manifesto
     )
     
     # List open PRs

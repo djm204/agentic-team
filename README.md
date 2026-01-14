@@ -59,11 +59,16 @@ cp .env.example .env
 Edit `.env` and add your credentials:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-GITHUB_TOKEN=your_github_personal_access_token_here
-GITHUB_REPO_OWNER=your_username
-GITHUB_REPO_NAME=your_repo_name
+GITHUB_TOKEN=your_github_personal_access_token_here  # Optional: only needed for GitHub operations
 DISCORD_WEBHOOK_URL=your_discord_webhook_url_here  # Optional: for real-time updates
 ```
+
+> CrewAI is **optional** for tests/CI. To run the full agent workflow locally, install the optional dependencies:
+> ```bash
+> pip install -r requirements-optional.txt
+> ```
+
+**Note:** Repository name and owner are now specified in the manifesto (see "Providing the Manifesto" section below). If not specified, the system will initialize a local git repository automatically.
 
 ### Discord Setup (Optional but Recommended)
 
@@ -150,9 +155,9 @@ def notification_callback(notification_type, data):
     print(f"Notification: {notification_type.value}")
 
 team = ProjectCreationTeam(
-    github_token="your_token",
-    github_owner="your_username",
-    github_repo="your_repo",
+    github_token="your_token",  # Optional: only needed for GitHub operations
+    github_owner=None,  # Will be parsed from manifesto or use authenticated user
+    github_repo=None,  # Will be parsed from manifesto or created if needed
     notification_callback=notification_callback,
     auto_approve=False,  # Set True for automated workflows
     discord_webhook_url="your_discord_webhook_url",  # Optional: for real-time Discord updates
@@ -181,7 +186,15 @@ print(f"Tests passed: {result['tests_passed']}")
 
 ### Providing the Manifesto
 
-The manifesto can be provided in several ways. You can also specify the output directory directly in the manifesto:
+The manifesto can be provided in several ways. You can also specify the output directory and repository information directly in the manifesto:
+
+**Specifying repository in manifesto:**
+```
+Create a Python REST API with FastAPI.
+
+github_repo: my-api-project
+github_owner: myusername
+```
 
 **Specifying output directory in manifesto:**
 ```
@@ -189,9 +202,16 @@ Add unit tests to this project with 80% code coverage.
 output_dir: ./
 ```
 
+**If no repository is specified:**
+- The system will automatically initialize a local git repository
+- If `GITHUB_TOKEN` is set and `create_pr=True`, it will create a GitHub repository automatically
+- Repository name will be generated from the manifesto (or use "new-project" as default)
+
 The system will automatically:
+- Parse `github_repo: repo_name` (or `repo: repo_name`, `repository: repo_name`) from the manifesto
+- Parse `github_owner: owner` (or `owner: owner`) from the manifesto
 - Parse `output_dir: ./` (or `output_dir: .`, `output directory: ./`, etc.) from the manifesto
-- Use the current directory instead of creating a new one
+- Use the current directory instead of creating a new one if `output_dir: ./` is specified
 - Auto-enable `write_files` if output_dir is specified
 
 **Other ways to provide the manifesto:**
@@ -301,9 +321,9 @@ for pr in open_prs:
 - `OPENAI_API_KEY` (required): Your OpenAI API key for LLM operations
 - `OPENAI_MODEL` (optional): Model to use (default: "gpt-4")
 - `OPENAI_TEMPERATURE` (optional): Temperature setting (default: 0.7)
-- `GITHUB_TOKEN` (required for PR operations): GitHub personal access token
-- `GITHUB_REPO_OWNER` (required for PR operations): Repository owner
-- `GITHUB_REPO_NAME` (required for PR operations): Repository name
+- `GITHUB_TOKEN` (optional): GitHub personal access token - only needed for GitHub operations (creating repos, PRs, etc.)
+  - Repository name and owner should be specified in the manifesto (see "Providing the Manifesto" section)
+  - If not specified in manifesto and `GITHUB_TOKEN` is set, a repository will be created automatically
 
 ### GitHub Token Permissions
 

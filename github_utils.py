@@ -16,12 +16,12 @@ class GitHubManager:
         
         Args:
             token: GitHub personal access token
-            owner: Repository owner (username or org)
-            repo_name: Repository name
+            owner: Repository owner (username or org) - optional, can be set later
+            repo_name: Repository name - optional, can be set later from manifesto
         """
         self.token = token or os.getenv("GITHUB_TOKEN")
-        self.owner = owner or os.getenv("GITHUB_REPO_OWNER")
-        self.repo_name = repo_name or os.getenv("GITHUB_REPO_NAME")
+        self.owner = owner  # Don't use env var, will be set from manifesto or authenticated user
+        self.repo_name = repo_name  # Don't use env var, will be set from manifesto
         
         if not self.token:
             raise ValueError("GitHub token is required. Set GITHUB_TOKEN environment variable.")
@@ -29,8 +29,13 @@ class GitHubManager:
         self.github = Github(self.token)
         self.repo = None
         
+        # Only set repo if both owner and repo_name are provided
         if self.owner and self.repo_name:
-            self.repo = self.github.get_repo(f"{self.owner}/{self.repo_name}")
+            try:
+                self.repo = self.github.get_repo(f"{self.owner}/{self.repo_name}")
+            except Exception:
+                # Repo doesn't exist yet, will be created later
+                self.repo = None
     
     def set_repository(self, owner: str, repo_name: str):
         """Set or change the target repository."""
