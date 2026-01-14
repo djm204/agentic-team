@@ -100,6 +100,45 @@ You'll receive real-time updates in Discord for:
 
 ## Usage
 
+### Quick Start: Running the App
+
+**1. Create a manifesto file** (optional, or use the example):
+```bash
+# Create a file with your project description
+cat > manifesto.txt << EOF
+Create a Python REST API with FastAPI that handles user authentication
+and provides CRUD operations for a blog post system.
+
+Requirements:
+- JWT authentication
+- User registration and login
+- Blog post CRUD operations
+- SQLite database
+- Unit tests with >80% coverage
+EOF
+```
+
+**2. Run with a manifesto file:**
+```bash
+python main.py manifesto.txt
+```
+
+**3. Run with the example manifesto:**
+```bash
+python main.py
+```
+
+**4. Or use it programmatically:**
+```python
+from main import load_manifesto, main
+
+# Load your manifesto
+manifesto = load_manifesto("manifesto.txt")
+
+# Run the main function
+main(manifesto_file="manifesto.txt")
+```
+
 ### Basic Usage
 
 ```python
@@ -138,6 +177,63 @@ result = team.create_project_from_manifesto(
 print(f"PR created: {result['pr']['url']}")
 print(f"Files created: {len(result['files_created'])}")
 print(f"Tests passed: {result['tests_passed']}")
+```
+
+### Providing the Manifesto
+
+The manifesto can be provided in several ways. You can also specify the output directory directly in the manifesto:
+
+**Specifying output directory in manifesto:**
+```
+Add unit tests to this project with 80% code coverage.
+output_dir: ./
+```
+
+The system will automatically:
+- Parse `output_dir: ./` (or `output_dir: .`, `output directory: ./`, etc.) from the manifesto
+- Use the current directory instead of creating a new one
+- Auto-enable `write_files` if output_dir is specified
+
+**Other ways to provide the manifesto:**
+
+**1. As a string variable:**
+```python
+manifesto = """
+Create a Python REST API with FastAPI that handles user authentication
+and provides CRUD operations for a blog post system.
+"""
+```
+
+**2. From a file:**
+```python
+# Load from file
+with open("manifesto.txt", "r") as f:
+    manifesto = f.read()
+
+result = team.create_project_from_manifesto(manifesto=manifesto)
+```
+
+**3. Using the helper function (see `main.py`):**
+```python
+from main import load_manifesto
+
+# Load from file or use default example
+manifesto = load_manifesto("manifesto.txt")  # or load_manifesto() for example
+result = team.create_project_from_manifesto(manifesto=manifesto)
+```
+
+**4. From command-line:**
+```python
+import sys
+if len(sys.argv) > 1:
+    with open(sys.argv[1], "r") as f:
+        manifesto = f.read()
+```
+
+**5. From environment variable:**
+```python
+import os
+manifesto = os.getenv("PROJECT_MANIFESTO", "")
 ```
 
 ### Using Environment Variables
@@ -211,10 +307,37 @@ for pr in open_prs:
 
 ### GitHub Token Permissions
 
-Your GitHub personal access token needs the following permissions:
-- `repo` (Full control of private repositories)
-  - `public_repo` (if using public repos)
-  - `write:org` (if using organization repos)
+Your GitHub personal access token needs the following permissions to create branches, pull requests, and merge PRs:
+
+**For Classic Personal Access Tokens:**
+- ✅ **`repo`** (Full control of private repositories) - **REQUIRED**
+  - This includes all sub-permissions needed:
+    - `repo:status` - Read/write repository status
+    - `repo_deployment` - Read/write deployment status
+    - `public_repo` - Access public repositories (if using public repos)
+    - `repo:invite` - Access repository invitations
+    - `security_events` - Read/write security events
+
+**For Fine-Grained Personal Access Tokens (GitHub's newer token type):**
+- ✅ **Repository permissions:**
+  - **Contents**: Read and write (to create branches and files)
+  - **Pull requests**: Read and write (to create and merge PRs)
+  - **Metadata**: Read-only (to access repository info)
+  - **Actions**: Read-only (optional, if you want to check CI/CD status)
+
+**Additional permissions (if needed):**
+- `write:org` - Only if using organization repositories and need org-level permissions
+- `read:org` - Only if you need to read organization information
+
+**Minimum Required Scopes:**
+The token must have at minimum:
+- Read/write access to repository contents (to create branches)
+- Read/write access to pull requests (to create and merge PRs)
+
+**Note:** The 403 Forbidden error you saw earlier typically means:
+1. The token doesn't have `repo` scope (classic tokens) or Contents/Pull requests permissions (fine-grained)
+2. The token doesn't have access to the specific repository
+3. The repository requires branch protection rules that prevent direct pushes
 
 ## Project Structure
 
@@ -224,7 +347,7 @@ agentic-team/
 ├── tasks.py           # Task definitions
 ├── team.py            # Main team orchestration
 ├── github_utils.py    # GitHub integration utilities
-├── example.py         # Usage examples
+├── main.py            # Main entry point
 ├── requirements.txt   # Python dependencies
 └── README.md          # This file
 ```

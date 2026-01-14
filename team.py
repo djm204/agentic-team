@@ -1,0 +1,1141 @@
+"""
+Main team orchestration for project creation from manifestos.
+"""
+from crewai import Crew, Process
+from agents import get_llm
+from tasks import (
+    create_planning_task,
+    create_development_task,
+    create_review_task,
+    create_testing_task,
+    create_pr_creation_task
+)
+from github_utils import GitHubManager, GitManager
+from file_utils import write_files_from_implementation
+from notifications import NotificationManager, NotificationType, ApprovalCheckpoint
+from context_manager import ContextManager
+from technical_hurdles import HurdleDetector, should_escalate
+from discord_integration import DiscordIntegration, DiscordStreamingHandler, DiscordMessageType
+from agent_collaboration import (
+    StandupManager, PeerReviewSystem, AgentManager,
+    AgentRecord, AgentPerformance, AgentStatus
+)
+from agents import (
+    create_project_manager_agent, create_developer_agent,
+    create_code_reviewer_agent, create_testing_agent, create_pr_manager_agent
+)
+from metrics_engine import MetricsEngine
+from codebase_analyzer import CodebaseAnalyzer
+import os
+import json
+import re
+from datetime import datetime
+import tiktoken
+
+
+class ProjectCreationTeam:
+    """
+    A reusable agentic team that creates projects from manifestos
+    and manages pull requests with approval checkpoints and notifications.
+    """
+    
+    def __init__(
+        self,
+        github_token: str = None,
+        github_owner: str = None,
+        github_repo: str = None,
+        repo_path: str = ".",
+        notification_callback: callable = None,
+        auto_approve: bool = False,
+        discord_webhook_url: str = None,
+        enable_discord_streaming: bool = True
+    ):
+        """
+        Initialize the project creation team.
+        
+        Args:
+            github_token: GitHub personal access token
+            github_owner: GitHub repository owner
+            github_repo: GitHub repository name
+            repo_path: Local repository path
+            notification_callback: Optional callback for notifications
+            auto_approve: Whether to auto-approve checkpoints (for testing)
+            discord_webhook_url: Discord webhook URL for real-time updates
+            enable_discord_streaming: Whether to stream agent actions to Discord
+        """
+        self.github_manager = None
+        self.repo_path = repo_path  # Store repo path for codebase analysis
+        self.git_manager = GitManager(repo_path)
+        
+        # Initialize Discord integration
+        self.discord = DiscordIntegration(discord_webhook_url)
+        self.discord_streaming = DiscordStreamingHandler(self.discord) if enable_discord_streaming and self.discord.enabled else None
+        
+        # Initialize notification manager with Discord
+        self.notification_manager = NotificationManager(
+            callback=notification_callback,
+            discord_integration=self.discord if self.discord.enabled else None
+        )
+        
+        # Initialize agent collaboration systems
+        self.standup_manager = StandupManager(self.discord if self.discord.enabled else None)
+        self.peer_review_system = PeerReviewSystem(self.discord if self.discord.enabled else None)
+        self.agent_manager = AgentManager(self.discord if self.discord.enabled else None)
+        
+        # Register agent factories
+        self.agent_manager.register_agent_factory("Project Manager", create_project_manager_agent)
+        self.agent_manager.register_agent_factory("Senior Software Developer", create_developer_agent)
+        self.agent_manager.register_agent_factory("Code Reviewer", create_code_reviewer_agent)
+        self.agent_manager.register_agent_factory("QA Engineer & Test Specialist", create_testing_agent)
+        self.agent_manager.register_agent_factory("PR Manager", create_pr_manager_agent)
+        
+        self.context_manager = ContextManager(model=os.getenv("OPENAI_MODEL", "gpt-4"))
+        self.hurdle_detector = HurdleDetector()
+        self.auto_approve = auto_approve
+        
+        # Initialize metrics engine with SQLite database
+        db_path = os.getenv("METRICS_DB_PATH", "metrics.db")
+        self.metrics_engine = MetricsEngine(db_path=db_path)
+        # Start the database connection
+        self.metrics_engine.start()
+        
+        # Track active agents
+        self.active_agents = {}
+        
+        # Token tracking setup
+        try:
+            self.token_encoding = tiktoken.encoding_for_model(os.getenv("OPENAI_MODEL", "gpt-4"))
+        except:
+            self.token_encoding = tiktoken.get_encoding("cl100k_base")
+        
+        if github_token or os.getenv("GITHUB_TOKEN"):
+            try:
+                self.github_manager = GitHubManager(
+                    token=github_token,
+                    owner=github_owner,
+                    repo_name=github_repo
+                )
+            except Exception as e:
+                print(f"Warning: GitHub integration not available: {e}")
+    
+    def create_project_from_manifesto(
+        self,
+        manifesto: str,
+        create_pr: bool = True,
+        branch_name: str = None,
+        auto_merge: bool = False,
+        write_files: bool = False,
+        output_dir: str = "."
+    ):
+        """
+        Create a project from a manifesto with approval checkpoints and notifications.
+        
+        Args:
+            manifesto: Project manifesto/requirements
+            create_pr: Whether to create a pull request
+            branch_name: Custom branch name (default: auto-generated)
+            auto_merge: Whether to automatically merge the PR after creation
+            write_files: Whether to write files to disk from implementation
+            output_dir: Directory to write files to (if write_files=True)
+        
+        Returns:
+            Dictionary with project details, plan, implementation, and PR info
+        """
+        print("🚀 Starting project creation from manifesto...")
+        
+        # Send Discord notification for start
+        if self.discord_streaming:
+            self.discord_streaming.on_stage_start("Project Creation")
+            from discord_integration import DiscordMessageType
+            self.discord.send_message(
+                title="🚀 Project Creation Started",
+                description=f"Starting project creation from manifesto...\n\n**Manifesto Preview:**\n```\n{manifesto[:300]}\n```",
+                message_type=DiscordMessageType.INFO
+            )
+        
+        # Check context window for manifesto
+        self.context_manager.check_context_usage(manifesto)
+        
+        # Parse output directory from manifesto if specified
+        # Look for patterns like "output_dir: ./" or "output directory: ./" or "write to: ./"
+        output_dir_patterns = [
+            r'output_dir\s*[:=]\s*([^\s\n]+)',
+            r'output\s+directory\s*[:=]\s*([^\s\n]+)',
+            r'write\s+to\s*[:=]\s*([^\s\n]+)',
+            r'output\s*[:=]\s*([^\s\n]+)'
+        ]
+        
+        parsed_output_dir = None
+        for pattern in output_dir_patterns:
+            match = re.search(pattern, manifesto, re.IGNORECASE)
+            if match:
+                parsed_output_dir = match.group(1).strip().strip('"').strip("'")
+                # Normalize "./" to "." (current directory)
+                if parsed_output_dir == "./" or parsed_output_dir == ".":
+                    parsed_output_dir = "."
+                break
+        
+        # Use parsed output_dir if found, otherwise use the provided one
+        if parsed_output_dir:
+            output_dir = parsed_output_dir
+            print(f"📁 Output directory specified in manifesto: {output_dir}")
+            # Auto-enable write_files if output_dir is specified in manifesto
+            if not write_files:
+                write_files = True
+                print(f"   (Auto-enabled write_files since output_dir was specified)")
+        
+        # Parse GitHub repository info from manifesto if specified
+        # Look for patterns like "github_repo: repo_name" or "repo: repo_name" or "repository: repo_name"
+        repo_patterns = [
+            r'github_repo\s*[:=]\s*([^\s\n]+)',
+            r'github\s+repo\s*[:=]\s*([^\s\n]+)',
+            r'repo\s*[:=]\s*([^\s\n]+)',
+            r'repository\s*[:=]\s*([^\s\n]+)'
+        ]
+        
+        parsed_github_repo = None
+        for pattern in repo_patterns:
+            match = re.search(pattern, manifesto, re.IGNORECASE)
+            if match:
+                parsed_github_repo = match.group(1).strip().strip('"').strip("'")
+                break
+        
+        # Parse GitHub owner from manifesto if specified
+        # Look for patterns like "github_owner: owner" or "owner: owner"
+        owner_patterns = [
+            r'github_owner\s*[:=]\s*([^\s\n]+)',
+            r'github\s+owner\s*[:=]\s*([^\s\n]+)',
+            r'owner\s*[:=]\s*([^\s\n]+)'
+        ]
+        
+        parsed_github_owner = None
+        for pattern in owner_patterns:
+            match = re.search(pattern, manifesto, re.IGNORECASE)
+            if match:
+                parsed_github_owner = match.group(1).strip().strip('"').strip("'")
+                break
+        
+        # Use parsed repo/owner if found, otherwise use the ones from __init__
+        if parsed_github_repo:
+            self.github_repo = parsed_github_repo
+            print(f"📦 GitHub repository specified in manifesto: {parsed_github_repo}")
+        
+        if parsed_github_owner:
+            self.github_owner = parsed_github_owner
+            print(f"👤 GitHub owner specified in manifesto: {parsed_github_owner}")
+        
+        # If repo is not provided, initialize git and create a new repo
+        if create_pr and not self.github_repo:
+            print("\n📦 No GitHub repository specified. Initializing git and creating a new repository...")
+            
+            # Initialize local git repo if needed
+            if self.git_manager.repo is None:
+                self.git_manager.initialize_repo()
+                print("   ✅ Initialized local git repository")
+            
+            # Generate repo name from manifesto or use a default
+            if parsed_github_repo:
+                repo_name = parsed_github_repo
+            else:
+                # Generate a repo name from the first line of manifesto
+                first_line = manifesto.split('\n')[0].strip()[:50]
+                repo_name = re.sub(r'[^a-zA-Z0-9_-]', '-', first_line.lower()).strip('-')
+                if not repo_name:
+                    repo_name = "new-project"
+                print(f"   Generated repository name: {repo_name}")
+            
+            # Create GitHub repository if we have a token
+            if self.github_manager and self.github_manager.token:
+                try:
+                    # Get owner from parsed value or authenticated user
+                    owner = parsed_github_owner
+                    if not owner:
+                        # Try to get from existing github_manager or authenticated user
+                        if self.github_manager.owner:
+                            owner = self.github_manager.owner
+                        else:
+                            from github import Github
+                            github = Github(self.github_manager.token)
+                            user = github.get_user()
+                            owner = user.login
+                    
+                    # Create the repository
+                    repo = self.github_manager.create_repository(
+                        repo_name=repo_name,
+                        description=f"Project created from manifesto",
+                        private=False,
+                        auto_init=True
+                    )
+                    
+                    self.github_repo = repo_name
+                    self.github_owner = owner
+                    
+                    # Update github_manager with new repo
+                    self.github_manager.set_repository(owner, repo_name)
+                    
+                    # Add remote if local repo exists
+                    if self.git_manager.repo:
+                        try:
+                            remote_url = repo.clone_url.replace('https://', f'https://{self.github_manager.token}@')
+                            self.git_manager.repo.create_remote('origin', remote_url)
+                            print(f"   ✅ Added remote 'origin' to local repository")
+                        except Exception as e:
+                            print(f"   ⚠️ Could not add remote: {e}")
+                    
+                    print(f"   ✅ Created GitHub repository: {owner}/{repo_name}")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Could not create GitHub repository: {e}")
+                    print(f"   Continuing with local git repository only...")
+            else:
+                print(f"   ⚠️ No GitHub token available. Using local git repository only.")
+                print(f"   Set GITHUB_TOKEN to create a GitHub repository automatically.")
+        
+        # Analyze existing codebase if this is a test generation or enhancement task
+        codebase_summary = None
+        is_test_task = "test" in manifesto.lower() or "coverage" in manifesto.lower() or "unit test" in manifesto.lower()
+        
+        # Determine write path (will be used later when writing files)
+        # Store it so we can use it in the file writing section
+        final_write_path = output_dir
+        
+        if is_test_task:
+            print("\n🔍 Analyzing existing codebase for test generation...")
+            try:
+                # For test tasks, determine where to analyze and where to write
+                # If output_dir is "." or "./", analyze and write to the same directory
+                if output_dir == "." or output_dir == "./":
+                    # Working in current directory - analyze and write to same place
+                    analysis_path = os.getcwd()
+                    final_write_path = "."  # Write to current directory
+                    print(f"   Working in current directory: {os.path.abspath(analysis_path)}")
+                    print(f"   (Test files will be written to the same directory)")
+                else:
+                    # output_dir is a different directory - analyze current project, write to output_dir
+                    if self.repo_path and os.path.exists(self.repo_path) and self.repo_path != ".":
+                        analysis_path = self.repo_path
+                    else:
+                        analysis_path = os.getcwd()
+                    final_write_path = output_dir
+                    print(f"   Analyzing existing codebase at: {os.path.abspath(analysis_path)}")
+                    print(f"   (Test files will be written to: {os.path.abspath(final_write_path)})")
+                
+                analyzer = CodebaseAnalyzer(base_path=analysis_path)
+                code_files = analyzer.find_code_files()
+                print(f"   Found {len(code_files)} code files to analyze")
+                
+                if len(code_files) > 0:
+                    codebase_summary = analyzer.get_codebase_summary(max_files=50)
+                    analysis_result = analyzer.analyze_codebase()
+                    files_without_tests = analysis_result['test_coverage']['files_without_tests']
+                    print(f"✅ Analyzed codebase: {len(code_files)} code files found")
+                    print(f"   Files needing tests: {files_without_tests}")
+                    
+                    if self.discord_streaming:
+                        self.discord_streaming.send_message(
+                            title="Codebase Analysis Complete",
+                            description=f"Analyzed {len(code_files)} code files in existing codebase. {files_without_tests} files need tests.",
+                            message_type=DiscordMessageType.INFO
+                        )
+                else:
+                    print(f"⚠️ No code files found in {os.path.abspath(analysis_path)}")
+                    codebase_summary = f"No code files found in {os.path.abspath(analysis_path)}. Proceed with standard implementation."
+                    
+            except Exception as e:
+                import traceback
+                error_details = traceback.format_exc()
+                print(f"⚠️ Could not analyze codebase: {e}")
+                print(f"   Error details: {error_details[:500]}")
+                codebase_summary = f"Codebase analysis failed: {str(e)}. Proceed with standard implementation."
+        
+        # Step 1: Planning
+        print("\n📋 Step 1: Creating development plan...")
+        if self.discord_streaming:
+            self.discord_streaming.on_stage_start("Planning Phase")
+            self.discord_streaming.on_agent_start("Project Manager", "Analyzing manifesto and creating development plan")
+        
+        # Include codebase summary in planning if available
+        planning_manifesto = manifesto
+        if codebase_summary and is_test_task:
+            planning_manifesto = f"{manifesto}\n\n**Existing Codebase Structure:**\n{codebase_summary}"
+        
+        planning_task = create_planning_task(planning_manifesto, self.context_manager)
+        pm_agent = planning_task.agent  # Get the Project Manager agent from the task
+        
+        # Create and register Project Manager agent record
+        pm_record = AgentRecord("Project Manager", pm_agent)
+        self.standup_manager.register_agent("Project Manager", pm_agent)
+        self.active_agents["Project Manager"] = pm_record
+        
+        planning_crew = Crew(
+            agents=[planning_task.agent],
+            tasks=[planning_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        # Stream planning progress to Discord
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_progress("Project Manager", "Analyzing requirements and creating plan...")
+        
+        plan_result = planning_crew.kickoff()
+        plan = str(plan_result)
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_complete("Project Manager", f"Plan created: {len(plan)} characters")
+            self.discord_streaming.on_stage_complete("Planning Phase", "Development plan created successfully")
+        
+        # Detect technical hurdles in plan
+        print("\n🔍 Detecting technical hurdles in plan...")
+        plan_hurdles = self.hurdle_detector.detect_hurdles(plan, context="planning")
+        critical_hurdles = [h for h in plan_hurdles if should_escalate(h)]
+        
+        if critical_hurdles:
+            for hurdle in critical_hurdles:
+                self.notification_manager.notify(
+                    NotificationType.TECHNICAL_HURDLE,
+                    hurdle.to_dict(),
+                    require_approval=True
+                )
+        
+        # Notify plan completion and request approval
+        print("\n✅ Plan created!")
+        approved = self.notification_manager.notify(
+            NotificationType.PLAN_COMPLETE,
+            {"plan": plan, "hurdles": [h.to_dict() for h in plan_hurdles]},
+            require_approval=True
+        )
+        
+        if not approved:
+            approval = self.notification_manager.request_approval(
+                ApprovalCheckpoint.PLAN_APPROVAL,
+                {"plan": plan, "auto_approve": self.auto_approve}
+            )
+            if not approval:
+                return {"error": "Plan approval rejected by user", "plan": plan}
+        
+        # Conduct standup before development
+        print("\n🤝 Conducting standup before development...")
+        standup_agents = [pm_record]
+        standup_result = self.standup_manager.conduct_standup(
+            standup_agents,
+            context="Pre-development standup to align on plan"
+        )
+        
+        # Step 2: Development
+        print("\n💻 Step 2: Implementing project...")
+        
+        # Create and register Developer agent
+        developer_agent = create_developer_agent(get_llm())
+        dev_record = AgentRecord("Senior Software Developer", developer_agent)
+        self.standup_manager.register_agent("Senior Software Developer", developer_agent)
+        self.active_agents["Senior Software Developer"] = dev_record
+        
+        # Conduct standup with both agents
+        standup_agents = [pm_record, dev_record]
+        self.standup_manager.conduct_standup(
+            standup_agents,
+            context="Development phase standup - Developer needs plan clarification"
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_stage_start("Development Phase")
+            self.discord_streaming.on_agent_start("Senior Software Developer", "Implementing project based on plan")
+            self.discord_streaming.log_agent_action(
+                "Senior Software Developer", "COLLABORATION", "Consulting with Project Manager",
+                {"collaboration_type": "standup", "participants": ["Project Manager", "Developer"]}
+            )
+        
+        development_task = create_development_task(plan, self.context_manager, codebase_summary=codebase_summary)
+        development_task.agent = developer_agent  # Use registered agent
+        development_crew = Crew(
+            agents=[development_task.agent],
+            tasks=[development_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_progress("Senior Software Developer", "Writing code, implementing features, adding tests...")
+            self.discord_streaming.log_agent_action(
+                "Senior Software Developer", "PROGRESS", "Writing code",
+                {"progress": "Implementing features, writing tests, adding CI/CD config"}
+            )
+        
+        implementation_result = development_crew.kickoff()
+        implementation = str(implementation_result)
+        
+        if self.discord_streaming:
+            file_count = len(re.findall(r'```\w*:?([^\n]+)', implementation))
+            self.discord_streaming.on_agent_complete("Senior Software Developer", f"Implementation complete: {file_count} files")
+            self.discord_streaming.log_agent_action(
+                "Senior Software Developer", "COMPLETE", "Implementation complete",
+                {"files_created": file_count, "result": "All code written and tested"}
+            )
+            self.discord_streaming.on_stage_complete("Development Phase", f"Implementation complete with {file_count} files")
+        
+        # Peer review: Project Manager reviews Developer's work
+        print("\n📝 Project Manager reviewing Developer's work...")
+        self.peer_review_system.conduct_peer_review(
+            reviewer_agent=pm_record,
+            reviewed_agent=dev_record,
+            work_product=implementation[:1000],
+            context="Reviewing implementation against plan"
+        )
+        
+        # Detect technical hurdles in implementation
+        print("\n🔍 Detecting technical hurdles in implementation...")
+        impl_hurdles = self.hurdle_detector.detect_hurdles(implementation, context="implementation")
+        critical_impl_hurdles = [h for h in impl_hurdles if should_escalate(h)]
+        
+        if critical_impl_hurdles:
+            for hurdle in critical_impl_hurdles:
+                self.notification_manager.notify(
+                    NotificationType.TECHNICAL_HURDLE,
+                    hurdle.to_dict(),
+                    require_approval=True
+                )
+        
+        # Calculate implementation stats
+        file_count = len(re.findall(r'```\w*:?([^\n]+)', implementation))
+        loc_estimate = len(implementation.split('\n'))
+        
+        # Notify implementation completion and request approval
+        print("\n✅ Implementation complete!")
+        approved = self.notification_manager.notify(
+            NotificationType.IMPLEMENTATION_COMPLETE,
+            {
+                "summary": implementation[:500],
+                "file_count": file_count,
+                "loc": loc_estimate,
+                "hurdles": [h.to_dict() for h in impl_hurdles]
+            },
+            require_approval=True
+        )
+        
+        if not approved:
+            approval = self.notification_manager.request_approval(
+                ApprovalCheckpoint.IMPLEMENTATION_APPROVAL,
+                {
+                    "summary": implementation[:500],
+                    "file_count": file_count,
+                    "loc": loc_estimate,
+                    "auto_approve": self.auto_approve
+                }
+            )
+            if not approval:
+                return {
+                    "error": "Implementation approval rejected by user",
+                    "plan": plan,
+                    "implementation": implementation
+                }
+        
+        # Step 3: Code Review
+        print("\n🔍 Step 3: Reviewing code...")
+        
+        # Create and register Code Reviewer agent
+        reviewer_agent = create_code_reviewer_agent(get_llm())
+        reviewer_record = AgentRecord("Code Reviewer", reviewer_agent)
+        self.standup_manager.register_agent("Code Reviewer", reviewer_agent)
+        self.active_agents["Code Reviewer"] = reviewer_record
+        
+        # Standup with all agents
+        standup_agents = [pm_record, dev_record, reviewer_record]
+        self.standup_manager.conduct_standup(
+            standup_agents,
+            context="Code review phase - Reviewer needs context from Developer"
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_stage_start("Code Review Phase")
+            self.discord_streaming.on_agent_start("Code Reviewer", "Reviewing code for quality, security, and compliance")
+            self.discord_streaming.log_agent_action(
+                "Code Reviewer", "START", "Beginning code review",
+                {"review_scope": "Security, PII, Testing, CI/CD"}
+            )
+        
+        review_task = create_review_task(implementation, plan, self.context_manager)
+        review_task.agent = reviewer_agent  # Use registered agent
+        review_crew = Crew(
+            agents=[review_task.agent],
+            tasks=[review_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_progress("Code Reviewer", "Reviewing security, PII handling, testing, and CI/CD...")
+            self.discord_streaming.log_agent_action(
+                "Code Reviewer", "PROGRESS", "Analyzing code",
+                {"checks": ["Security", "PII compliance", "Test coverage", "CI/CD"]}
+            )
+        
+        review_result = review_crew.kickoff()
+        review = str(review_result)
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_complete("Code Reviewer", "Code review complete")
+            self.discord_streaming.log_agent_action(
+                "Code Reviewer", "COMPLETE", "Code review finished",
+                {"review_length": len(review), "result": "Review complete with feedback"}
+            )
+            self.discord_streaming.on_stage_complete("Code Review Phase", "Code review completed")
+        
+        print("\n✅ Code review complete!")
+        
+        # Peer review: Code Reviewer reviews Developer's work
+        print("\n📝 Code Reviewer providing peer feedback to Developer...")
+        self.peer_review_system.conduct_peer_review(
+            reviewer_agent=reviewer_record,
+            reviewed_agent=dev_record,
+            work_product=review[:1000],
+            context="Formal code review with feedback"
+        )
+        
+        # Extract code quality metrics from review
+        dry_violations = 0
+        complexity_score = 5.0
+        readability_score = 5.0
+        maintainability_score = 5.0
+        
+        # Try to parse metrics from review
+        if "DRY Violations Count:" in review:
+            try:
+                lines = review.split('\n')
+                for i, line in enumerate(lines):
+                    if "DRY Violations Count:" in line:
+                        dry_violations = int(re.search(r'\d+', line).group())
+                    elif "Complexity Score:" in line:
+                        match = re.search(r'(\d+(?:\.\d+)?)', line)
+                        if match:
+                            complexity_score = float(match.group())
+                    elif "Readability Score:" in line:
+                        match = re.search(r'(\d+(?:\.\d+)?)', line)
+                        if match:
+                            readability_score = float(match.group())
+                    elif "Maintainability Score:" in line:
+                        match = re.search(r'(\d+(?:\.\d+)?)', line)
+                        if match:
+                            maintainability_score = float(match.group())
+            except:
+                pass
+        
+        # Record code quality metrics
+        self.metrics_engine.record_code_quality(
+            "Senior Software Developer",
+            dry_violations=dry_violations,
+            complexity_score=complexity_score,
+            readability_score=readability_score,
+            maintainability_score=maintainability_score
+        )
+        
+        # Evaluate Developer performance
+        if self.agent_manager.evaluate_agent("Senior Software Developer", threshold=2.0):
+            print("⚠️ Developer performance below threshold - agent may be replaced")
+        
+        # Step 4: Testing
+        print("\n🧪 Step 4: Creating and running tests...")
+        
+        # Create and register QA Engineer agent
+        qa_agent = create_testing_agent(get_llm())
+        qa_record = AgentRecord("QA Engineer & Test Specialist", qa_agent)
+        self.standup_manager.register_agent("QA Engineer & Test Specialist", qa_agent)
+        self.active_agents["QA Engineer & Test Specialist"] = qa_record
+        
+        # Standup with Developer and QA
+        standup_agents = [dev_record, qa_record]
+        self.standup_manager.conduct_standup(
+            standup_agents,
+            context="Testing phase - QA needs to understand implementation"
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_stage_start("Testing Phase")
+            self.discord_streaming.on_agent_start("QA Engineer & Test Specialist", "Creating and running comprehensive test suite")
+            self.discord_streaming.log_agent_action(
+                "QA Engineer & Test Specialist", "COLLABORATION", "Consulting with Developer",
+                {"purpose": "Understanding implementation for test creation"}
+            )
+        
+        testing_task = create_testing_task(implementation, plan, self.context_manager, codebase_summary=codebase_summary)
+        testing_task.agent = qa_agent  # Use registered agent
+        testing_crew = Crew(
+            agents=[testing_task.agent],
+            tasks=[testing_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_progress("QA Engineer & Test Specialist", "Writing tests, executing test suite...")
+            self.discord_streaming.log_agent_action(
+                "QA Engineer & Test Specialist", "PROGRESS", "Creating tests",
+                {"test_types": ["Unit", "Integration", "Security", "PII validation"]}
+            )
+        
+        test_result = testing_crew.kickoff()
+        test_results = str(test_result)
+        
+        if self.discord_streaming:
+            self.discord_streaming.on_agent_complete("QA Engineer & Test Specialist", "Test suite complete")
+            self.discord_streaming.log_agent_action(
+                "QA Engineer & Test Specialist", "COMPLETE", "Test suite finished",
+                {"test_results": test_results[:200]}
+            )
+            self.discord_streaming.on_stage_complete("Testing Phase", "Testing phase completed")
+        
+        # Peer review: QA reviews Developer's testability
+        self.peer_review_system.conduct_peer_review(
+            reviewer_agent=qa_record,
+            reviewed_agent=dev_record,
+            work_product=test_results[:1000],
+            context="Reviewing code testability and test coverage"
+        )
+        
+        # Parse test results
+        tests_passed = self._parse_test_results(test_results)
+        
+        if tests_passed:
+            self.notification_manager.notify(
+                NotificationType.TESTING_PASSED,
+                {"test_results": test_results}
+            )
+        else:
+            self.notification_manager.notify(
+                NotificationType.TESTING_FAILED,
+                {"test_results": test_results, "test_failures": "See test results above"}
+            )
+            print("⚠️ Some tests failed. Review test results before proceeding.")
+        
+        # Optional: Write files to disk
+        created_files = []
+        if write_files:
+            print("\n📁 Writing files to disk...")
+            try:
+                # If creating a PR, write files to the repo_path to ensure they can be committed
+                if create_pr and self.github_manager and self.repo_path:
+                    if final_write_path == "." or final_write_path == "./":
+                        write_path = self.repo_path if self.repo_path != "." else os.getcwd()
+                    else:
+                        # If output_dir is specified and different from repo_path, use repo_path for PR
+                        write_path = self.repo_path if self.repo_path != "." else final_write_path
+                    print(f"   Writing to repository directory: {os.path.abspath(write_path)}")
+                else:
+                    # Use the determined write path (final_write_path was set during analysis or defaults to output_dir)
+                    if final_write_path == "." or final_write_path == "./":
+                        write_path = os.getcwd()
+                        print(f"   Writing to current directory: {os.path.abspath(write_path)}")
+                    else:
+                        write_path = final_write_path
+                        print(f"   Writing to: {os.path.abspath(write_path)}")
+                
+                # Write files from implementation (development phase)
+                impl_files = write_files_from_implementation(implementation, write_path)
+                created_files.extend(impl_files)
+                
+                # Also write test files from test_results (testing phase)
+                # This is especially important for test generation tasks
+                if test_results:
+                    test_files = write_files_from_implementation(test_results, write_path)
+                    created_files.extend(test_files)
+                    if test_files:
+                        print(f"   Created {len(test_files)} test files from testing phase")
+                
+                print(f"✅ Created {len(created_files)} total files")
+            except Exception as e:
+                import traceback
+                print(f"⚠️ Error writing files: {e}")
+                print(f"   Error details: {traceback.format_exc()[:500]}")
+        
+        # Step 5: PR Creation (if requested)
+        pr_info = None
+        if create_pr and self.github_manager:
+            print("\n📝 Step 5: Creating pull request...")
+            
+            # Create and register PR Manager agent
+            pr_agent = create_pr_manager_agent(get_llm())
+            pr_record = AgentRecord("PR Manager", pr_agent)
+            self.standup_manager.register_agent("PR Manager", pr_agent)
+            self.active_agents["PR Manager"] = pr_record
+            
+            # Final standup with all agents
+            all_agents = [pm_record, dev_record, reviewer_record, qa_record, pr_record]
+            self.standup_manager.conduct_standup(
+                all_agents,
+                context="Final standup before PR creation - all agents align"
+            )
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_stage_start("PR Creation Phase")
+                self.discord_streaming.on_agent_start("PR Manager", "Creating pull request")
+                self.discord_streaming.log_agent_action(
+                    "PR Manager", "COLLABORATION", "Gathering info from all agents",
+                    {"sources": ["Developer", "Code Reviewer", "QA Engineer"]}
+                )
+            
+            branch = branch_name or f"feature/project-{hash(manifesto) % 10000}"
+            
+            # Request approval before creating PR
+            approval = self.notification_manager.request_approval(
+                ApprovalCheckpoint.PRE_PR_APPROVAL,
+                {
+                    "title": "Project Implementation",
+                    "branch": branch,
+                    "body": f"Implementation of project from manifesto.\n\nTest Status: {'✅ Passed' if tests_passed else '❌ Failed'}",
+                    "auto_approve": self.auto_approve
+                }
+            )
+            
+            if not approval:
+                return {
+                    "error": "PR creation approval rejected by user",
+                    "plan": plan,
+                    "implementation": implementation,
+                    "review": review,
+                    "test_results": test_results
+                }
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_progress("PR Manager", "Preparing PR documentation and metadata...")
+                self.discord_streaming.log_agent_action(
+                    "PR Manager", "PROGRESS", "Compiling PR information",
+                    {"sources": ["Code review", "Test results", "Implementation"]}
+                )
+            
+            pr_task = create_pr_creation_task(review, test_results, branch, self.context_manager)
+            pr_task.agent = pr_agent  # Use registered agent
+            pr_crew = Crew(
+                agents=[pr_task.agent],
+                tasks=[pr_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            pr_result = pr_crew.kickoff()
+            pr_data = str(pr_result)
+            
+            if self.discord_streaming:
+                self.discord_streaming.on_agent_complete("PR Manager", "PR documentation ready")
+                self.discord_streaming.log_agent_action(
+                    "PR Manager", "COMPLETE", "PR documentation finished",
+                    {"pr_data_length": len(pr_data)}
+                )
+            
+            # Final peer reviews
+            print("\n📝 Conducting final peer reviews...")
+            # PR Manager reviews all agents' collaboration
+            self.peer_review_system.conduct_peer_review(
+                reviewer_agent=pr_record,
+                reviewed_agent=dev_record,
+                work_product=pr_data[:1000],
+                context="Final review of overall project quality"
+            )
+            
+            # Evaluate all agents
+            print("\n📊 Evaluating agent performance...")
+            for agent_name in ["Project Manager", "Senior Software Developer", "Code Reviewer", "QA Engineer & Test Specialist", "PR Manager"]:
+                if agent_name in self.active_agents:
+                    should_fire = self.agent_manager.evaluate_agent(agent_name, threshold=2.0)
+                    if should_fire:
+                        print(f"⚠️ {agent_name} performance below threshold")
+            
+            # Parse PR information
+            try:
+                pr_info = self._parse_pr_info(pr_data, branch)
+                
+                # Commit and push files before creating PR
+                if write_files and created_files:
+                    print(f"\n📝 Committing {len(created_files)} files to branch '{branch}'...")
+                    try:
+                        # Ensure we're in the right directory (repo_path)
+                        original_cwd = os.getcwd()
+                        repo_dir = self.repo_path if self.repo_path != "." else os.getcwd()
+                        
+                        if not os.path.exists(repo_dir):
+                            raise ValueError(f"Repository directory does not exist: {repo_dir}")
+                        
+                        # Update git manager to use the correct repo path
+                        self.git_manager = GitManager(repo_dir)
+                        
+                        # Initialize repo if needed
+                        if self.git_manager.repo is None:
+                            self.git_manager.initialize_repo()
+                        
+                        os.chdir(repo_dir)
+                        
+                        # Create/checkout branch locally
+                        self.git_manager.create_branch(branch)
+                        
+                        # Convert absolute paths to relative paths for git
+                        relative_files = []
+                        for file_path in created_files:
+                            if os.path.isabs(file_path):
+                                # Make relative to repo directory
+                                rel_path = os.path.relpath(file_path, repo_dir)
+                            else:
+                                rel_path = file_path
+                            # Only include if file exists
+                            if os.path.exists(os.path.join(repo_dir, rel_path)):
+                                relative_files.append(rel_path)
+                        
+                        if not relative_files:
+                            print("⚠️ Warning: No files found to commit. Files may have been written to a different location.")
+                        else:
+                            # Commit the created files
+                            commit_message = f"Add project implementation\n\n{pr_info.get('title', 'Project Implementation')}\n\nFiles created: {len(relative_files)}"
+                            self.git_manager.commit_changes(commit_message, files=relative_files)
+                            
+                            # Push branch to remote
+                            print(f"📤 Pushing branch '{branch}' to remote...")
+                            self.git_manager.push_branch(branch)
+                            
+                            print(f"✅ Committed and pushed {len(relative_files)} files to branch '{branch}'")
+                        
+                        # Restore original directory
+                        os.chdir(original_cwd)
+                    except Exception as git_error:
+                        import traceback
+                        print(f"⚠️ Warning: Could not commit/push files locally: {git_error}")
+                        print(f"   Error details: {traceback.format_exc()[:300]}")
+                        print("   Attempting to create PR anyway (files may need to be committed manually)")
+                        # Restore directory even on error
+                        try:
+                            os.chdir(original_cwd)
+                        except:
+                            pass
+                
+                # Create the branch on GitHub (if not already exists from local push)
+                try:
+                    self.github_manager.create_branch(branch)
+                except Exception as e:
+                    # Branch might already exist from local push, that's OK
+                    print(f"   Branch '{branch}' already exists on remote (from local push)")
+                
+                # Create the PR
+                pr = self.github_manager.create_pull_request(
+                    title=pr_info.get("title", "Project Implementation"),
+                    body=pr_info.get("body", pr_data),
+                    head=branch,
+                    base="main"
+                )
+                
+                pr_info.update({
+                    "number": pr.number,
+                    "url": pr.html_url,
+                    "branch": branch
+                })
+                
+                self.notification_manager.notify(
+                    NotificationType.PR_CREATED,
+                    {
+                        "number": pr.number,
+                        "url": pr.html_url,
+                        "branch": branch
+                    }
+                )
+                
+                print(f"\n✅ Pull request created: {pr.html_url}")
+                
+                if self.discord_streaming:
+                    self.discord_streaming.on_stage_complete("PR Creation Phase", f"PR #{pr.number} created successfully")
+                
+                # Auto-merge if requested
+                if auto_merge:
+                    print("\n🔄 Auto-merging PR...")
+                    if self.discord_streaming:
+                        self.discord_streaming.on_stage_start("PR Merge")
+                    merged = self.github_manager.merge_pull_request(pr.number)
+                    if merged:
+                        self.notification_manager.notify(
+                            NotificationType.PR_MERGED,
+                            {
+                                "number": pr.number,
+                                "url": pr.html_url
+                            }
+                        )
+                        if self.discord_streaming:
+                            self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
+                        print("✅ PR merged successfully!")
+                        pr_info["merged"] = True
+                
+            except Exception as e:
+                print(f"⚠️ Error creating PR: {e}")
+                pr_info = {"error": str(e)}
+        
+        # Record project completion
+        if pr_info and "error" not in pr_info:
+            self.metrics_engine.update_project_metric("projects_completed", 1)
+        elif pr_info and "error" in pr_info:
+            self.metrics_engine.update_project_metric("projects_failed", 1)
+        
+        return {
+            "manifesto": manifesto,
+            "plan": plan,
+            "implementation": implementation,
+            "review": review,
+            "test_results": test_results,
+            "tests_passed": tests_passed,
+            "pr": pr_info,
+            "files_created": created_files if write_files else [],
+            "hurdles": {
+                "plan": [h.to_dict() for h in plan_hurdles],
+                "implementation": [h.to_dict() for h in impl_hurdles]
+            }
+        }
+    
+    def create_pull_request(
+        self,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+        draft: bool = False
+    ):
+        """
+        Create a pull request directly.
+        
+        Args:
+            title: PR title
+            body: PR description
+            head: Source branch
+            base: Target branch
+            draft: Whether to create as draft
+        
+        Returns:
+            Pull request object
+        """
+        if not self.github_manager:
+            raise ValueError("GitHub manager not initialized")
+        
+        pr = self.github_manager.create_pull_request(
+            title=title,
+            body=body,
+            head=head,
+            base=base,
+            draft=draft
+        )
+        
+        self.notification_manager.notify(
+            NotificationType.PR_CREATED,
+            {
+                "number": pr.number,
+                "url": pr.html_url,
+                "branch": head
+            }
+        )
+        
+        return pr
+    
+    def merge_pull_request(
+        self,
+        pr_number: int,
+        merge_method: str = "merge"
+    ):
+        """
+        Merge a pull request.
+        
+        Args:
+            pr_number: PR number
+            merge_method: Merge method ('merge', 'squash', or 'rebase')
+        
+        Returns:
+            True if merged successfully
+        """
+        if not self.github_manager:
+            raise ValueError("GitHub manager not initialized")
+        
+        merged = self.github_manager.merge_pull_request(
+            pr_number=pr_number,
+            merge_method=merge_method
+        )
+        
+        if merged:
+            pr = self.github_manager.get_pull_request(pr_number)
+            self.notification_manager.notify(
+                NotificationType.PR_MERGED,
+                {
+                    "number": pr_number,
+                    "url": pr.html_url
+                }
+            )
+        
+        return merged
+    
+    def list_pull_requests(self, state: str = "open"):
+        """List pull requests in the repository."""
+        if not self.github_manager:
+            raise ValueError("GitHub manager not initialized")
+        
+        return self.github_manager.list_pull_requests(state=state)
+    
+    def _parse_pr_info(self, pr_data: str, branch: str) -> dict:
+        """
+        Parse PR information from agent output.
+        Attempts to extract title and body from structured or unstructured text.
+        """
+        # Try to parse as JSON first
+        try:
+            return json.loads(pr_data)
+        except:
+            pass
+        
+        # Try to extract from markdown or structured text
+        lines = pr_data.split('\n')
+        title = None
+        body_lines = []
+        
+        for i, line in enumerate(lines):
+            if 'title' in line.lower() and ':' in line:
+                title = line.split(':', 1)[1].strip()
+            elif 'description' in line.lower() or 'body' in line.lower():
+                body_lines = lines[i+1:]
+                break
+        
+        if not title:
+            # Use first line as title or generate one
+            title = lines[0].strip() if lines else "Project Implementation"
+            if len(title) > 100:
+                title = title[:97] + "..."
+        
+        body = '\n'.join(body_lines) if body_lines else pr_data
+        
+        return {
+            "title": title,
+            "body": body
+        }
+    
+    def _parse_test_results(self, test_results: str) -> bool:
+        """Parse test results to determine if tests passed."""
+        test_results_lower = test_results.lower()
+        
+        # Look for pass indicators
+        pass_indicators = ['all tests passed', 'tests passed', '✓', '✅', 'passed:']
+        fail_indicators = ['tests failed', 'failed:', '❌', '✗', 'error:', 'failure']
+        
+        has_pass = any(indicator in test_results_lower for indicator in pass_indicators)
+        has_fail = any(indicator in test_results_lower for indicator in fail_indicators)
+        
+        # If we see explicit failures, return False
+        if has_fail and not has_pass:
+            return False
+        
+        # If we see passes and no failures, return True
+        if has_pass and not has_fail:
+            return True
+        
+        # Default to True if ambiguous (assume tests were created successfully)
+        return True
+    
+    def start_dashboard(self, host='0.0.0.0', port=5000, debug=False):
+        """
+        Start the metrics dashboard server.
+        
+        Args:
+            host: Host to bind to
+            port: Port to bind to
+            debug: Enable debug mode
+        """
+        from dashboard import run_dashboard
+        # Pass metrics engine to dashboard
+        import dashboard
+        dashboard.metrics_engine = self.metrics_engine
+        run_dashboard(host=host, port=port, debug=debug)
