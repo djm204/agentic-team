@@ -486,6 +486,10 @@ pytest || exit 1
         """
         print("🚀 Starting project creation from manifesto...")
         
+        # Initialize hurdles variables (may be empty if phases are skipped)
+        plan_hurdles = []
+        impl_hurdles = []
+        
         # Monitor context window for manifesto
         context_usage = self.context_manager.check_context_usage(manifesto)
         if context_usage["warning"]:
@@ -493,7 +497,30 @@ pytest || exit 1
         
         # Analyze manifesto to determine optimal resource allocation
         print("\n🎯 Analyzing project requirements for optimal resource allocation...")
-        allocation = ResourceAllocation.analyze_and_allocate(manifesto, create_pr)
+        try:
+            from resource_allocator import ResourceAllocation, TaskType
+            allocation = ResourceAllocation.analyze_and_allocate(manifesto, create_pr)
+        except ImportError:
+            # Fallback if resource_allocator is not available - use full team
+            print("   ⚠️ Resource allocator not available, using full team")
+            allocation = {
+                "task_type": TaskType.FULL_PROJECT if 'TaskType' in globals() else None,
+                "required_agents": {
+                    "project_manager": True,
+                    "developer": True,
+                    "code_reviewer": True,
+                    "qa_engineer": True,
+                    "pr_manager": True
+                },
+                "required_phases": {
+                    "planning": True,
+                    "development": True,
+                    "code_review": True,
+                    "testing": True,
+                    "pr_creation": create_pr
+                },
+                "agent_count": 5
+            }
         task_type = allocation["task_type"]
         required_agents = allocation["required_agents"]
         required_phases = allocation["required_phases"]
@@ -511,9 +538,10 @@ pytest || exit 1
         if self.discord_streaming:
             self.discord_streaming.on_stage_start("Project Creation")
             from discord_integration import DiscordMessageType
+            task_type_str = task_type.value if task_type and hasattr(task_type, 'value') else "Full Project"
             self.discord.send_message(
                 title="🚀 Project Creation Started",
-                description=f"Starting project creation from manifesto...\n\n**Task Type:** {task_type.value}\n**Agents:** {', '.join(active_agent_names) if active_agent_names else 'None'}\n**Optimization:** {'✅ Optimized' if agent_count < 5 else '⚠️ Full team'}\n\n**Manifesto Preview:**\n```\n{manifesto[:300]}\n```",
+                description=f"Starting project creation from manifesto...\n\n**Task Type:** {task_type_str}\n**Agents:** {', '.join(active_agent_names) if active_agent_names else 'None'}\n**Optimization:** {'✅ Optimized' if agent_count < 5 else '⚠️ Full team'}\n\n**Manifesto Preview:**\n```\n{manifesto[:300]}\n```",
                 message_type=DiscordMessageType.INFO
             )
         

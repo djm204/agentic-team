@@ -81,12 +81,20 @@ def main(manifesto_file: str = None, auto_approve: bool = False):
         enable_discord_streaming=True  # Enable real-time streaming to Discord
     )
     
+    # Generate branch name from manifesto (first line, sanitized)
+    import re
+    first_line = manifesto.split('\n')[0].strip()[:50]
+    branch_suffix = re.sub(r'[^a-zA-Z0-9_-]', '-', first_line.lower()).strip('-')
+    if not branch_suffix:
+        branch_suffix = "project"
+    branch_name = f"feature/{branch_suffix}"
+    
     # Create project from manifesto
     # When --yes is provided, enable full automation including auto-merge
     result = team.create_project_from_manifesto(
         manifesto=manifesto,
         create_pr=True,  # Set to False if you don't want to create a PR
-        branch_name="feature/task-management-app",
+        branch_name=branch_name,  # Auto-generated from manifesto
         auto_merge=False,  # Keep reviews even in auto_approve mode - only merge when all feedback addressed
         write_files=True,  # Set to True to write files to disk
         output_dir="./generated_project"  # Directory to write files
