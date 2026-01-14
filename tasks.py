@@ -144,7 +144,7 @@ def create_development_task(plan: str, context_manager: ContextManager = None, c
 
 
 def create_review_task(implementation: str, plan: str, context_manager: ContextManager = None):
-    """Creates a task for reviewing the implementation."""
+    """Creates a task for rigorous code review of the implementation."""
     reviewer = create_code_reviewer_agent(get_llm())
     
     # Manage context window - summarize if needed
@@ -155,7 +155,7 @@ def create_review_task(implementation: str, plan: str, context_manager: ContextM
             implementation = context_manager.summarize_for_context(implementation, max_tokens=context_manager.max_input_tokens // 2)
     
     return Task(
-        description=f"""Review the following implementation against the original plan:
+        description=f"""Perform a RIGOROUS, SYSTEMATIC code review of the following implementation against the original plan.
 
         Original Plan:
         {plan}
@@ -163,21 +163,142 @@ def create_review_task(implementation: str, plan: str, context_manager: ContextM
         Implementation:
         {implementation}
 
-        Review for:
-        1. Code quality and best practices (SOLID, DRY, maintainability)
-        2. Adherence to the plan
-        3. Completeness of implementation
-        4. Security vulnerabilities (OWASP Top 10, injection attacks, auth flaws)
-        5. PII handling compliance (encryption, access controls, data retention)
-        6. Test coverage and quality (unit tests, edge cases)
-        7. CI/CD integration (proper pipeline configuration)
-        8. Performance optimizations
-        9. Documentation quality
-        
-        Provide constructive, actionable feedback. Elevate the code quality by suggesting 
-        improvements. Work collaboratively with the developer to understand context.""",
+        **MANDATORY REVIEW CHECKLIST - Complete ALL sections:**
+
+        **1. CODE QUALITY & ARCHITECTURE (CRITICAL)**
+        - [ ] SOLID principles compliance (Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion)
+        - [ ] DRY violations: Count and list ALL instances of code duplication with specific file paths and line numbers
+        - [ ] Code complexity: Flag functions/classes with high cyclomatic complexity (>10)
+        - [ ] Design patterns: Verify appropriate use (or flag over-engineering)
+        - [ ] Separation of concerns: Check for proper layering (presentation, business logic, data access)
+        - [ ] Dependency management: Verify proper dependency injection and loose coupling
+        - [ ] Error handling: Check for comprehensive try/catch blocks and proper error propagation
+        - [ ] Logging: Verify appropriate logging levels and structured logging
+        - [ ] Code organization: Check file structure, module organization, and naming conventions
+
+        **2. ADHERENCE TO PLAN (MANDATORY)**
+        - [ ] Feature completeness: Verify ALL features from plan are implemented
+        - [ ] Architecture alignment: Check if implementation matches planned architecture
+        - [ ] Technology stack: Verify correct technologies are used as specified
+        - [ ] Missing components: List any planned features/components not implemented
+        - [ ] Scope creep: Flag any unplanned additions that should be discussed
+
+        **3. SECURITY AUDIT (CRITICAL - OWASP Top 10)**
+        - [ ] Injection attacks: SQL injection, NoSQL injection, Command injection, LDAP injection
+        - [ ] Broken authentication: Weak passwords, session fixation, credential stuffing vulnerabilities
+        - [ ] Sensitive data exposure: Unencrypted data, weak encryption, exposed secrets/API keys
+        - [ ] XML External Entities (XXE): If XML parsing exists, verify protection
+        - [ ] Broken access control: Missing authorization checks, insecure direct object references
+        - [ ] Security misconfiguration: Default credentials, exposed debug info, missing security headers
+        - [ ] XSS (Cross-Site Scripting): Input sanitization, output encoding
+        - [ ] Insecure deserialization: Verify safe deserialization practices
+        - [ ] Using components with known vulnerabilities: Check dependency versions
+        - [ ] Insufficient logging & monitoring: Security event logging
+        - [ ] Input validation: All user inputs validated and sanitized
+        - [ ] Rate limiting: API endpoints protected against abuse
+        - [ ] CORS configuration: Properly configured if web app
+        - [ ] HTTPS enforcement: Verify secure communication
+
+        **4. PII HANDLING COMPLIANCE (CRITICAL)**
+        - [ ] Data minimization: Only collect necessary PII
+        - [ ] Encryption at rest: PII encrypted in databases/storage
+        - [ ] Encryption in transit: TLS/SSL for all PII transmission
+        - [ ] Access controls: Role-based access control (RBAC) for PII
+        - [ ] Data retention: Policies and automated deletion of expired PII
+        - [ ] Consent management: Proper consent tracking and validation
+        - [ ] Right to deletion: Implementation of data deletion requests
+        - [ ] Audit logging: All PII access logged with timestamps and user IDs
+        - [ ] GDPR compliance: Verify GDPR requirements if applicable
+        - [ ] CCPA compliance: Verify CCPA requirements if applicable
+        - [ ] Anonymization: PII properly anonymized where possible
+
+        **5. TESTING & QUALITY ASSURANCE (MANDATORY)**
+        - [ ] Test coverage: Verify >80% code coverage with specific metrics
+        - [ ] Unit tests: All functions/classes have corresponding unit tests
+        - [ ] Integration tests: API endpoints and services have integration tests
+        - [ ] Edge cases: Tests cover boundary conditions, null inputs, error cases
+        - [ ] Test quality: Tests are meaningful, not just coverage padding
+        - [ ] Test organization: Tests follow proper structure and naming conventions
+        - [ ] Mocking: Proper use of mocks/stubs for external dependencies
+        - [ ] Test data: Safe test data, no production data in tests
+        - [ ] Performance tests: Critical paths have performance benchmarks
+        - [ ] Security tests: Security vulnerabilities tested (e.g., SQL injection attempts)
+
+        **6. CI/CD PIPELINE (MANDATORY)**
+        - [ ] Pipeline configuration: Proper CI/CD config files present (.github/workflows, etc.)
+        - [ ] Automated testing: Tests run automatically on PR/commit
+        - [ ] Linting: Code linting automated in pipeline
+        - [ ] Security scanning: Automated security vulnerability scanning
+        - [ ] Build process: Automated build and artifact generation
+        - [ ] Deployment: Proper deployment automation (if applicable)
+        - [ ] Environment management: Proper dev/staging/prod environment handling
+        - [ ] Rollback strategy: Ability to rollback deployments
+
+        **7. PERFORMANCE & SCALABILITY (IMPORTANT)**
+        - [ ] Database queries: Efficient queries, proper indexing, no N+1 problems
+        - [ ] Caching: Appropriate caching strategies implemented
+        - [ ] Resource usage: Memory leaks, CPU efficiency, resource cleanup
+        - [ ] Async operations: Proper use of async/await where beneficial
+        - [ ] API response times: Endpoints meet performance requirements
+        - [ ] Scalability: Code can handle increased load
+
+        **8. DOCUMENTATION & MAINTAINABILITY (IMPORTANT)**
+        - [ ] Code comments: Complex logic properly commented
+        - [ ] Function/class docstrings: All public APIs documented
+        - [ ] README: Comprehensive README with setup, usage, and architecture
+        - [ ] API documentation: API endpoints documented (OpenAPI/Swagger if applicable)
+        - [ ] Architecture docs: System architecture documented
+        - [ ] Deployment docs: Deployment and operations documentation
+        - [ ] Code readability: Code is self-documenting with clear naming
+
+        **9. CODE METRICS (REQUIRED OUTPUT)**
+        Provide specific metrics:
+        - DRY Violations Count: [number] with file paths and line numbers
+        - Code Coverage: [percentage]%
+        - Security Issues Found: [number] (Critical: [X], High: [Y], Medium: [Z])
+        - PII Compliance Score: [percentage]% (list any gaps)
+        - Test Coverage: [percentage]% (unit: [X]%, integration: [Y]%)
+        - Complexity Score: Average cyclomatic complexity: [number]
+
+        **10. ACTIONABLE FEEDBACK (MANDATORY)**
+        For each issue found:
+        - Severity: Critical / High / Medium / Low
+        - Location: File path and line number(s)
+        - Description: Clear explanation of the issue
+        - Recommendation: Specific, actionable fix suggestion
+        - Example: Code example showing the fix (if applicable)
+
+        **REVIEW OUTPUT FORMAT:**
+        Structure your review as follows:
+
+        ## Code Review Report
+
+        ### Executive Summary
+        - Overall assessment: [PASS/FAIL/WITH_ISSUES]
+        - Critical issues: [count]
+        - Blocking issues: [list]
+        - Recommended action: [APPROVE/REQUEST_CHANGES/REJECT]
+
+        ### Detailed Findings
+        [Organize by category above]
+
+        ### Metrics Summary
+        [Include all metrics from section 9]
+
+        ### Recommendations
+        [Prioritized list of improvements]
+
+        **RIGOR REQUIREMENTS:**
+        - Be thorough: Check EVERY file, EVERY function, EVERY security concern
+        - Be specific: Provide exact file paths, line numbers, and code examples
+        - Be actionable: Every issue must have a clear recommendation
+        - Be critical: Don't approve code with critical security issues or major quality problems
+        - Be constructive: Help the developer improve, don't just criticize
+        - Be token-efficient: Be concise but comprehensive
+
+        This is a RIGOROUS review - leave no stone unturned.""",
         agent=reviewer,
-        expected_output="Comprehensive code review with security, PII, testing, and CI/CD feedback, plus actionable suggestions"
+        expected_output="Comprehensive, systematic code review report with checklist completion, metrics, security audit, PII compliance check, and prioritized actionable feedback with file paths and line numbers"
     )
 
 
