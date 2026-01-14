@@ -1,7 +1,14 @@
 """
 Main team orchestration for project creation from manifestos.
 """
-from crewai import Crew, Process
+try:
+    from crewai import Crew, Process
+    CREWAI_AVAILABLE = True
+except ImportError:
+    CREWAI_AVAILABLE = False
+    Crew = None
+    Process = None
+
 from agents import get_llm
 from tasks import (
     create_planning_task,
@@ -148,6 +155,11 @@ class ProjectCreationTeam:
         Returns:
             Dictionary with project details, plan, implementation, and PR info
         """
+        if not CREWAI_AVAILABLE:
+            raise ImportError(
+                "crewai is required to use ProjectCreationTeam. "
+                "Install it with: pip install crewai"
+            )
         print("🚀 Starting project creation from manifesto...")
         
         # Send Discord notification for start
