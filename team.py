@@ -144,6 +144,7 @@ class ProjectCreationTeam:
     ):
         """
         Create a project from a manifesto with approval checkpoints and notifications.
+        When auto_approve is True, this will iterate until the task is fully complete.
         
         Args:
             manifesto: Project manifesto/requirements
@@ -156,12 +157,339 @@ class ProjectCreationTeam:
         Returns:
             Dictionary with project details, plan, implementation, and PR info
         """
+        # If auto_approve is enabled, iterate until task is complete
+        if self.auto_approve:
+            return self._create_project_with_iteration(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                auto_merge=auto_merge,
+                write_files=write_files,
+                output_dir=output_dir
+            )
+        else:
+            # Single pass execution
+            return self._create_project_single_pass(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                auto_merge=auto_merge,
+                write_files=write_files,
+                output_dir=output_dir
+            )
+    
+    def _create_project_single_pass(
+        self,
+        manifesto: str,
+        create_pr: bool = True,
+        branch_name: str = None,
+        auto_merge: bool = False,
+        write_files: bool = False,
+        output_dir: str = "."
+    ):
+        """
+        Single pass project creation (original implementation).
+        """
         if not CREWAI_AVAILABLE:
             raise ImportError(
                 "crewai is required to use ProjectCreationTeam. "
                 "Install it with: pip install crewai"
             )
+        
+        # If auto_approve is enabled, iterate until task is complete
+        if self.auto_approve:
+            return self._create_project_with_iteration(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                auto_merge=auto_merge,
+                write_files=write_files,
+                output_dir=output_dir
+            )
+        else:
+            # Single pass execution
+            return self._create_project_single_pass(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                auto_merge=auto_merge,
+                write_files=write_files,
+                output_dir=output_dir
+            )
+    
+    def _create_project_with_iteration(
+        self,
+        manifesto: str,
+        create_pr: bool = True,
+        branch_name: str = None,
+        auto_merge: bool = False,
+        write_files: bool = False,
+        output_dir: str = "."
+    ):
+        """
+        Iterate until task is fully complete. Used when auto_approve is True.
+        """
+        max_iterations = 10  # Prevent infinite loops
+        iteration = 0
+        all_results = []
+        
+        print("🤖 Auto-pilot mode: Iterating until task is fully complete...")
+        
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n{'='*80}")
+            print(f"🔄 Iteration {iteration}/{max_iterations}")
+            print(f"{'='*80}")
+            
+            # Monitor context window before each iteration
+            context_usage = self.context_manager.check_context_usage(manifesto)
+            if context_usage["warning"]:
+                print(f"⚠️ Context window usage: {context_usage['usage_percent']:.1f}%")
+                # Summarize manifesto if needed
+                if context_usage["usage_percent"] > 90:
+                    manifesto = self.context_manager.summarize_for_context(
+                        manifesto, 
+                        max_tokens=self.context_manager.max_input_tokens // 2
+                    )
+                    print("   Summarized manifesto to fit context window")
+            
+            # Execute single pass
+            result = self._create_project_single_pass(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                auto_merge=auto_merge or self.auto_approve,  # Force auto-merge in auto mode
+                write_files=write_files,
+                output_dir=output_dir
+            )
+            
+            all_results.append(result)
+            
+            # Check if task is complete
+            is_complete = self._is_task_complete(result, manifesto)
+            
+            if is_complete:
+                print(f"\n✅ Task completed successfully after {iteration} iteration(s)!")
+                return result
+            
+            # If not complete, prepare for next iteration
+            print(f"\n⚠️ Task not yet complete. Analyzing what needs to be done...")
+            
+            # Update manifesto with feedback for next iteration
+            feedback = self._extract_feedback_for_next_iteration(result)
+            if feedback:
+                manifesto = f"{manifesto}\n\n**Previous Iteration Feedback:**\n{feedback}"
+                print(f"   Added feedback to manifesto for next iteration")
+            
+            # Brief pause to avoid rate limits
+            import time
+            time.sleep(2)
+        
+        print(f"\n⚠️ Reached maximum iterations ({max_iterations}). Returning last result.")
+        return all_results[-1] if all_results else result
+    
+    def _is_task_complete(self, result: dict, manifesto: str) -> bool:
+        """
+        Determine if the task is complete based on result and manifesto.
+        """
+        # Check if PR was created and merged (if PR creation was requested)
+        if result.get("pr"):
+            pr_info = result["pr"]
+            if "merged" in pr_info and pr_info["merged"]:
+                print("   ✅ PR merged successfully")
+                return True
+            if "error" in pr_info:
+                print(f"   ❌ PR creation failed: {pr_info['error']}")
+                return False
+            if "merge_deferred" in pr_info and pr_info.get("merge_deferred"):
+                print(f"   ⏸️  PR merge deferred")
+                return False
+        
+        # Check if tests passed (if testing was required)
+        if result.get("tests_passed") is False:
+            print("   ❌ Tests failed")
+            return False
+        
+        # Check if critical hurdles were resolved
+        hurdles = result.get("hurdles", {})
+        critical_plan_hurdles = [h for h in hurdles.get("plan", []) if h.get("severity") == "critical"]
+        critical_impl_hurdles = [h for h in hurdles.get("implementation", []) if h.get("severity") == "critical"]
+        
+        if critical_plan_hurdles or critical_impl_hurdles:
+            print(f"   ⚠️  Critical hurdles remain: {len(critical_plan_hurdles + critical_impl_hurdles)}")
+            return False
+        
+        # Check if files were created (if write_files was True)
+        if result.get("files_created"):
+            files_created = len(result["files_created"])
+            if files_created > 0:
+                print(f"   ✅ {files_created} files created")
+        
+        # If we have implementation and no blocking issues, consider complete
+        if result.get("implementation") and not result.get("pr", {}).get("merge_deferred"):
+            print("   ✅ Implementation complete with no blocking issues")
+            return True
+        
+        return False
+    
+    def _extract_feedback_for_next_iteration(self, result: dict) -> str:
+        """
+        Extract feedback from result to inform next iteration.
+        """
+        feedback_parts = []
+        
+        # Extract PR feedback
+        if result.get("pr"):
+            pr_info = result["pr"]
+            if pr_info.get("merge_deferred"):
+                if pr_info.get("unresolved_feedback_count", 0) > 0:
+                    feedback_parts.append(f"- PR has {pr_info['unresolved_feedback_count']} unresolved feedback items")
+                if pr_info.get("merge_decision"):
+                    feedback_parts.append(f"- PR Manager decision: {pr_info['merge_decision'][:200]}")
+        
+        # Extract test feedback
+        if result.get("tests_passed") is False:
+            test_results = result.get("test_results", "")
+            if test_results:
+                feedback_parts.append(f"- Test failures: {test_results[:300]}")
+        
+        # Extract hurdle feedback
+        hurdles = result.get("hurdles", {})
+        critical_hurdles = []
+        for h in hurdles.get("plan", []) + hurdles.get("implementation", []):
+            if h.get("severity") == "critical":
+                critical_hurdles.append(h.get("description", "")[:100])
+        
+        if critical_hurdles:
+            feedback_parts.append(f"- Critical hurdles: {', '.join(critical_hurdles[:3])}")
+        
+        return "\n".join(feedback_parts) if feedback_parts else ""
+    
+    def _setup_pre_commit_hooks(self, base_path: str, created_files: list):
+        """
+        Set up Husky (Node.js) or pre-commit hooks (Python) to run tests on commit.
+        """
+        import os
+        from pathlib import Path
+        
+        base = Path(base_path)
+        
+        # Check if this is a Node.js project
+        has_package_json = any('package.json' in f for f in created_files) or (base / 'package.json').exists()
+        has_node_modules = (base / 'node_modules').exists()
+        
+        # Check if this is a Python project
+        has_pyproject = any('pyproject.toml' in f for f in created_files) or (base / 'pyproject.toml').exists()
+        has_setup_py = any('setup.py' in f for f in created_files) or (base / 'setup.py').exists()
+        has_requirements = any('requirements' in f for f in created_files) or (base / 'requirements.txt').exists()
+        has_pytest = any('pytest' in f.lower() or 'test_' in f.lower() for f in created_files)
+        
+        is_node_project = has_package_json or has_node_modules
+        is_python_project = (has_pyproject or has_setup_py or has_requirements) and has_pytest
+        
+        if is_node_project:
+            print("\n🔧 Setting up Husky pre-commit hooks for Node.js project...")
+            try:
+                # Create .husky directory
+                husky_dir = base / '.husky'
+                husky_dir.mkdir(exist_ok=True)
+                
+                # Create pre-commit hook
+                pre_commit_hook = husky_dir / 'pre-commit'
+                with open(pre_commit_hook, 'w') as f:
+                    f.write("""#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Run tests before commit
+npm test || exit 1
+""")
+                
+                # Make it executable
+                os.chmod(pre_commit_hook, 0o755)
+                
+                # Update package.json to include husky if it exists
+                package_json_path = base / 'package.json'
+                if package_json_path.exists():
+                    import json
+                    try:
+                        with open(package_json_path, 'r') as f:
+                            package_json = json.load(f)
+                        
+                        # Add husky to devDependencies if not present
+                        if 'devDependencies' not in package_json:
+                            package_json['devDependencies'] = {}
+                        if 'husky' not in package_json['devDependencies']:
+                            package_json['devDependencies']['husky'] = '^8.0.3'
+                        
+                        # Add prepare script to install husky
+                        if 'scripts' not in package_json:
+                            package_json['scripts'] = {}
+                        if 'prepare' not in package_json['scripts']:
+                            package_json['scripts']['prepare'] = 'husky install'
+                        
+                        with open(package_json_path, 'w') as f:
+                            json.dump(package_json, f, indent=2)
+                        
+                        print("   ✅ Updated package.json with Husky configuration")
+                    except Exception as e:
+                        print(f"   ⚠️ Could not update package.json: {e}")
+                
+                print("   ✅ Husky pre-commit hook created")
+            except Exception as e:
+                print(f"   ⚠️ Could not set up Husky: {e}")
+        
+        elif is_python_project:
+            print("\n🔧 Setting up pre-commit hooks for Python project...")
+            try:
+                # Create .pre-commit-config.yaml
+                pre_commit_config = base / '.pre-commit-config.yaml'
+                with open(pre_commit_config, 'w') as f:
+                    f.write("""repos:
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [commit]
+""")
+                
+                # Create .git/hooks/pre-commit if .git exists
+                git_hooks_dir = base / '.git' / 'hooks'
+                if git_hooks_dir.exists():
+                    pre_commit_git_hook = git_hooks_dir / 'pre-commit'
+                    with open(pre_commit_git_hook, 'w') as f:
+                        f.write("""#!/bin/bash
+# Run pytest before commit
+pytest || exit 1
+""")
+                    os.chmod(pre_commit_git_hook, 0o755)
+                    print("   ✅ Git pre-commit hook created")
+                
+                print("   ✅ Pre-commit configuration created")
+            except Exception as e:
+                print(f"   ⚠️ Could not set up pre-commit hooks: {e}")
+    
+    def _create_project_single_pass(
+        self,
+        manifesto: str,
+        create_pr: bool = True,
+        branch_name: str = None,
+        auto_merge: bool = False,
+        write_files: bool = False,
+        output_dir: str = "."
+    ):
+        """
+        Single pass project creation (original implementation).
+        """
         print("🚀 Starting project creation from manifesto...")
+        
+        # Monitor context window for manifesto
+        context_usage = self.context_manager.check_context_usage(manifesto)
+        if context_usage["warning"]:
+            print(f"⚠️ Context window usage: {context_usage['usage_percent']:.1f}%")
         
         # Analyze manifesto to determine optimal resource allocation
         print("\n🎯 Analyzing project requirements for optimal resource allocation...")
@@ -402,6 +730,17 @@ class ProjectCreationTeam:
             if codebase_summary and is_test_task:
                 planning_manifesto = f"{manifesto}\n\n**Existing Codebase Structure:**\n{codebase_summary}"
             
+            # Monitor context window for planning
+            planning_context_usage = self.context_manager.check_context_usage(planning_manifesto)
+            if planning_context_usage["warning"]:
+                print(f"⚠️ Context window usage for planning: {planning_context_usage['usage_percent']:.1f}%")
+                if planning_context_usage["usage_percent"] > 90:
+                    planning_manifesto = self.context_manager.summarize_for_context(
+                        planning_manifesto,
+                        max_tokens=self.context_manager.max_input_tokens // 2
+                    )
+                    print("   Summarized manifesto for planning phase")
+            
             planning_task = create_planning_task(planning_manifesto, self.context_manager)
             pm_agent = planning_task.agent  # Get the Project Manager agent from the task
             
@@ -491,6 +830,25 @@ class ProjectCreationTeam:
                     {"collaboration_type": "standup", "participants": ["Project Manager", "Developer"] if pm_record else ["Developer"]}
                 )
         
+            # Monitor context window for development
+            dev_context_inputs = [plan]
+            if codebase_summary:
+                dev_context_inputs.append(codebase_summary)
+            dev_context_usage = self.context_manager.check_context_usage(*dev_context_inputs)
+            if dev_context_usage["warning"]:
+                print(f"⚠️ Context window usage for development: {dev_context_usage['usage_percent']:.1f}%")
+                if dev_context_usage["usage_percent"] > 90:
+                    plan = self.context_manager.summarize_for_context(
+                        plan,
+                        max_tokens=self.context_manager.max_input_tokens // 2
+                    )
+                    if codebase_summary:
+                        codebase_summary = self.context_manager.summarize_for_context(
+                            codebase_summary,
+                            max_tokens=self.context_manager.max_input_tokens // 4
+                        )
+                    print("   Summarized plan and codebase for development phase")
+            
             development_task = create_development_task(plan, self.context_manager, codebase_summary=codebase_summary)
             development_task.agent = developer_agent  # Use registered agent
             development_crew = Crew(
@@ -612,6 +970,38 @@ class ProjectCreationTeam:
                     "Code Reviewer", "START", "Beginning code review",
                     {"review_scope": "Security, PII, Testing, CI/CD"}
                 )
+            
+            # Monitor context window for review
+            review_context_usage = self.context_manager.check_context_usage(implementation, plan)
+            if review_context_usage["warning"]:
+                print(f"⚠️ Context window usage for review: {review_context_usage['usage_percent']:.1f}%")
+                if review_context_usage["usage_percent"] > 90:
+                    # Summarize implementation more aggressively than plan
+                    implementation = self.context_manager.summarize_for_context(
+                        implementation,
+                        max_tokens=self.context_manager.max_input_tokens // 2
+                    )
+                    plan = self.context_manager.summarize_for_context(
+                        plan,
+                        max_tokens=self.context_manager.max_input_tokens // 4
+                    )
+                    print("   Summarized implementation and plan for review phase")
+            
+            # Monitor context window for review
+            review_context_usage = self.context_manager.check_context_usage(implementation, plan)
+            if review_context_usage["warning"]:
+                print(f"⚠️ Context window usage for review: {review_context_usage['usage_percent']:.1f}%")
+                if review_context_usage["usage_percent"] > 90:
+                    # Summarize implementation more aggressively than plan
+                    implementation = self.context_manager.summarize_for_context(
+                        implementation,
+                        max_tokens=self.context_manager.max_input_tokens // 2
+                    )
+                    plan = self.context_manager.summarize_for_context(
+                        plan,
+                        max_tokens=self.context_manager.max_input_tokens // 4
+                    )
+                    print("   Summarized implementation and plan for review phase")
             
             review_task = create_review_task(implementation, plan, self.context_manager)
             review_task.agent = reviewer_agent  # Use registered agent
@@ -816,6 +1206,9 @@ class ProjectCreationTeam:
                     created_files.extend(test_files)
                     if test_files:
                         print(f"   Created {len(test_files)} test files from testing phase")
+                
+                # Set up Husky/pre-commit hooks if applicable
+                self._setup_pre_commit_hooks(write_path, created_files)
                 
                 print(f"✅ Created {len(created_files)} total files")
             except Exception as e:
@@ -1028,7 +1421,8 @@ class ProjectCreationTeam:
                 if self.discord_streaming:
                     self.discord_streaming.on_stage_complete("PR Creation Phase", f"PR #{pr.number} created successfully")
                 
-                # Step 6: PR Review and Feedback (if not auto-merging)
+                # Step 6: PR Review and Feedback (always run reviews, even in auto_approve mode)
+                # Reviews are essential for quality - we only skip if explicitly auto-merging
                 if not auto_merge:
                     print("\n🔍 Step 6: Triggering PR review by agents...")
                     
@@ -1044,6 +1438,14 @@ class ProjectCreationTeam:
                     if qa_record:
                         reviewing_agents.append(("QA Engineer & Test Specialist", qa_record))
                     
+                    # Monitor context window before reviews
+                    review_context_usage = self.context_manager.check_context_usage(
+                        pr_info.get("body", ""),
+                        implementation if implementation else ""
+                    )
+                    if review_context_usage["warning"]:
+                        print(f"⚠️ Context window usage before reviews: {review_context_usage['usage_percent']:.1f}%")
+                    
                     # Have each agent review the PR and leave comments
                     for agent_name, agent_record in reviewing_agents:
                         print(f"\n📝 {agent_name} reviewing PR...")
@@ -1053,13 +1455,28 @@ class ProjectCreationTeam:
                         
                         # Create PR review task for this agent
                         from tasks import create_pr_review_task
+                        
+                        # Monitor and manage context for review task
+                        review_body = pr_info.get("body", pr_data)
+                        review_implementation = implementation if implementation else None
+                        if review_implementation:
+                            review_context_check = self.context_manager.check_context_usage(
+                                review_body, review_implementation
+                            )
+                            if review_context_check["warning"]:
+                                review_implementation = self.context_manager.summarize_for_context(
+                                    review_implementation,
+                                    max_tokens=self.context_manager.max_input_tokens // 3
+                                )
+                                print(f"   Summarized implementation for {agent_name} review")
+                        
                         pr_review_task = create_pr_review_task(
                             pr_number=pr.number,
                             pr_url=pr.html_url,
                             pr_title=pr_info.get("title", "Project Implementation"),
-                            pr_body=pr_info.get("body", pr_data),
+                            pr_body=review_body,
                             agent=agent_record.agent,
-                            implementation=implementation if implementation else None,
+                            implementation=review_implementation,
                             agent_name=agent_name,
                             context_manager=self.context_manager
                         )
@@ -1102,6 +1519,13 @@ class ProjectCreationTeam:
                         pr_comments = self.github_manager.get_pr_comments(pr.number)
                         review_comments = self.github_manager.get_pr_review_comments(pr.number)
                         
+                        # Monitor context window for comments
+                        comments_text = "\n".join([c.body for c in pr_comments] + [c.body for c in review_comments])
+                        if comments_text:
+                            comments_context_usage = self.context_manager.check_context_usage(comments_text)
+                            if comments_context_usage["warning"]:
+                                print(f"⚠️ Context window usage for comments: {comments_context_usage['usage_percent']:.1f}%")
+                        
                         # Format comments for merge decision task
                         all_comments = []
                         for comment in pr_comments:
@@ -1128,6 +1552,16 @@ class ProjectCreationTeam:
                         
                         # Create merge decision task
                         from tasks import create_pr_merge_decision_task
+                        
+                        # Summarize comments if context window is getting full
+                        if len(all_comments) > 20:  # Many comments, might need summarization
+                            comments_summary = self.context_manager.summarize_for_context(
+                                "\n".join([c.get("body", "") for c in all_comments]),
+                                max_tokens=self.context_manager.max_input_tokens // 4
+                            )
+                            # Keep only most recent comments if too many
+                            all_comments = all_comments[-10:]  # Keep last 10 comments
+                        
                         merge_decision_task = create_pr_merge_decision_task(
                             pr_number=pr.number,
                             pr_url=pr.html_url,
@@ -1229,9 +1663,9 @@ class ProjectCreationTeam:
                         print(f"   Error details: {traceback.format_exc()[:300]}")
                         pr_info["review_error"] = str(review_error)
                 
-                # Auto-merge if requested (original behavior)
+                # Auto-merge if explicitly requested (bypasses review)
                 elif auto_merge:
-                    print("\n🔄 Auto-merging PR...")
+                    print("\n🔄 Auto-merging PR (bypassing review)...")
                     if self.discord_streaming:
                         self.discord_streaming.on_stage_start("PR Merge")
                     merged = self.github_manager.merge_pull_request(pr.number)
@@ -1247,6 +1681,10 @@ class ProjectCreationTeam:
                             self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
                         print("✅ PR merged successfully!")
                         pr_info["merged"] = True
+                    else:
+                        print("⚠️ Auto-merge failed. Will retry in next iteration if auto_approve is enabled.")
+                        pr_info["merge_attempted"] = True
+                        pr_info["merge_failed"] = True
                 
             except Exception as e:
                 print(f"⚠️ Error creating PR: {e}")

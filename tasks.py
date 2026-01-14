@@ -78,7 +78,15 @@ def create_development_task(plan: str, context_manager: ContextManager = None, c
         {plan}
         {codebase_section}
 
-        Your implementation should:
+        Your implementation should follow the **TRACER BULLET** approach:
+        
+        **TRACER BULLET METHODOLOGY (MANDATORY):**
+        1. **START SIMPLE**: Begin with the absolute minimum working version
+        2. **GET IT WORKING**: Make sure the core functionality works end-to-end first
+        3. **ITERATE**: Then add features, error handling, and polish incrementally
+        4. **VERIFY AS YOU GO**: Test each iteration to ensure it still works
+        
+        **IMPLEMENTATION STEPS:**
         1. **FIRST**: Analyze the existing codebase structure (if provided above)
         2. **FOR TEST GENERATION TASKS**: 
            - Identify all files that need unit tests
@@ -86,20 +94,32 @@ def create_development_task(plan: str, context_manager: ContextManager = None, c
            - Write comprehensive tests for each function and class
            - Ensure tests follow the same directory structure as source code
            - Use proper test naming conventions (test_*.py, *_test.py, etc.)
-        3. Create all necessary files and directories
-        4. Write production-ready code with proper error handling
-        5. **STRICTLY ADHERE TO DRY PRINCIPLES**: Never duplicate code. Extract common functionality into reusable functions/modules.
-        6. **PRIORITIZE SIMPLICITY**: Write the simplest solution that works. Avoid over-engineering.
-        7. **ENSURE ELEGANCE**: Code should be beautiful, readable, and well-structured.
-        8. **MAXIMIZE HUMAN READABILITY**: Use descriptive names, clear structure, and helpful comments.
-        9. Include documentation and comments (but be concise - token efficient)
-        10. Follow best practices for the chosen technology stack
-        11. Ensure code is modular and maintainable
-        12. Include any necessary configuration files
-        13. Implement security best practices (input validation, secure auth, etc.)
-        14. Properly handle PII (encryption, access controls, data minimization)
-        15. Write unit tests for all critical functions (aim for >80% coverage)
-        16. Include CI/CD configuration files (.github/workflows, etc.)
+        3. **TRACER BULLET PHASE**: Create a minimal working version first
+           - Start with the simplest possible implementation
+           - Get core functionality working end-to-end
+           - Verify it works before adding complexity
+        4. **ITERATION PHASE**: Build upon the working foundation
+           - Add error handling incrementally
+           - Add features one at a time
+           - Test after each addition
+        5. Create all necessary files and directories
+        6. Write production-ready code with proper error handling
+        7. **STRICTLY ADHERE TO DRY PRINCIPLES**: Never duplicate code. Extract common functionality into reusable functions/modules.
+        8. **PRIORITIZE SIMPLICITY**: Write the simplest solution that works. Avoid over-engineering.
+        9. **ENSURE ELEGANCE**: Code should be beautiful, readable, and well-structured.
+        10. **MAXIMIZE HUMAN READABILITY**: Use descriptive names, clear structure, and helpful comments.
+        11. Include documentation and comments (but be concise - token efficient)
+        12. Follow best practices for the chosen technology stack
+        13. Ensure code is modular and maintainable
+        14. Include any necessary configuration files
+        15. Implement security best practices (input validation, secure auth, etc.)
+        16. Properly handle PII (encryption, access controls, data minimization)
+        17. Write unit tests for all critical functions (aim for >80% coverage)
+        18. Include CI/CD configuration files (.github/workflows, etc.)
+        19. **INCLUDE HUSKY PRE-COMMIT HOOKS**: Add Husky configuration to run tests on commit
+           - For Node.js projects: Add .husky/pre-commit hook that runs tests
+           - For Python projects: Add pre-commit hooks (via pre-commit framework or husky-like setup)
+           - Ensure tests must pass before commits are allowed
         
         **CRITICAL**: Before writing any code, check if similar functionality already exists. Reuse it instead of duplicating.
         Be token-efficient: be concise, avoid repetition, and focus on delivering value.

@@ -82,11 +82,12 @@ def main(manifesto_file: str = None, auto_approve: bool = False):
     )
     
     # Create project from manifesto
+    # When --yes is provided, enable full automation including auto-merge
     result = team.create_project_from_manifesto(
         manifesto=manifesto,
         create_pr=True,  # Set to False if you don't want to create a PR
         branch_name="feature/task-management-app",
-        auto_merge=False,  # Set to True to auto-merge after creation
+        auto_merge=False,  # Keep reviews even in auto_approve mode - only merge when all feedback addressed
         write_files=True,  # Set to True to write files to disk
         output_dir="./generated_project"  # Directory to write files
     )
