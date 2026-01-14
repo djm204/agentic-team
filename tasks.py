@@ -440,3 +440,121 @@ def create_pr_creation_task(review: str, test_results: str = None, branch_name: 
         agent=pr_manager,
         expected_output="PR title, description with test results and CI/CD status, and metadata formatted for GitHub API"
     )
+
+
+def create_pr_review_task(pr_number: int, pr_url: str, pr_title: str, pr_body: str, agent, implementation: str = None, agent_name: str = None, context_manager: ContextManager = None):
+    """
+    Creates a task for an agent to review a pull request and leave comments.
+    
+    Args:
+        pr_number: Pull request number
+        pr_url: URL to the PR
+        pr_title: PR title
+        pr_body: PR description/body
+        agent: The agent that will perform the review (required)
+        implementation: Optional implementation code to review
+        agent_name: Name of the agent performing the review (for comment identification)
+        context_manager: Optional context manager for token management
+    """
+    # Manage context window
+    if context_manager and implementation:
+        usage = context_manager.check_context_usage(pr_body, implementation)
+        if usage["warning"]:
+            implementation = context_manager.summarize_for_context(implementation, max_tokens=context_manager.max_input_tokens // 2)
+    
+    implementation_section = f"\n\nImplementation Code:\n{implementation}" if implementation else ""
+    
+    return Task(
+        description=f"""Review the following pull request and provide feedback:
+
+        PR #{pr_number}: {pr_title}
+        URL: {pr_url}
+        
+        PR Description:
+        {pr_body}
+        {implementation_section}
+
+        Your task:
+        1. Review the PR thoroughly from your expertise perspective
+        2. Identify any issues, concerns, or suggestions
+        3. Provide constructive feedback
+        4. If you find issues, clearly state what needs to be fixed
+        5. If everything looks good, provide approval
+        
+        **IMPORTANT**: When leaving your comment, you MUST identify yourself as "{agent_name or 'Reviewer'}" 
+        at the beginning of your comment so it's clear which agent provided the feedback.
+        
+        Format your feedback as a comment that will be posted on the PR. Be specific, 
+        actionable, and professional. Include file paths and line numbers when referencing code.""",
+        agent=agent,
+        expected_output=f"Review feedback from {agent_name or 'Reviewer'} formatted as a PR comment, with agent identification at the start"
+    )
+
+
+def create_pr_merge_decision_task(pr_number: int, pr_url: str, pr_comments: list, context_manager: ContextManager = None):
+    """
+    Creates a task for the PR Manager to decide whether a PR is ready to merge.
+    
+    Args:
+        pr_number: Pull request number
+        pr_url: URL to the PR
+        pr_comments: List of comments on the PR
+        context_manager: Optional context manager for token management
+    """
+    from agents import create_pr_manager_agent, get_llm
+    
+    pr_manager = create_pr_manager_agent(get_llm())
+    
+    # Format comments for context
+    comments_text = ""
+    if pr_comments:
+        for comment in pr_comments:
+            author = comment.get("author", "unknown")
+            body = comment.get("body", "")
+            comment_type = comment.get("type", "comment")
+            if comment_type == "review_comment":
+                path = comment.get("path", "")
+                line = comment.get("line", "")
+                comments_text += f"\n\n[{comment_type.upper()}] {author} on {path}:{line}:\n{body}"
+            else:
+                comments_text += f"\n\n[{comment_type.upper()}] {author}:\n{body}"
+    else:
+        comments_text = "\n\nNo comments on this PR yet."
+    
+    # Manage context window
+    if context_manager:
+        usage = context_manager.check_context_usage(comments_text)
+        if usage["warning"]:
+            comments_text = context_manager.summarize_for_context(comments_text, max_tokens=context_manager.max_input_tokens // 2)
+    
+    return Task(
+        description=f"""Review the pull request and determine if it's ready to merge:
+
+        PR #{pr_number}: {pr_url}
+        
+        Comments and Feedback:
+        {comments_text}
+
+        Your task:
+        1. Review all comments and feedback on the PR
+        2. Determine if all critical feedback has been addressed
+        3. Check if there are any blocking issues
+        4. Verify that the PR meets merge criteria:
+           - All critical feedback addressed
+           - Tests passing (if applicable)
+           - CI/CD green (if applicable)
+           - Code review approved
+           - No blocking issues
+        
+        5. Make a decision:
+           - If ready to merge: Provide a clear "APPROVED FOR MERGE" decision with merge method recommendation
+           - If not ready: List specific issues that must be addressed before merging
+        
+        Format your decision clearly, indicating:
+        - Merge decision (APPROVED / NOT_READY)
+        - Merge method recommendation (merge, squash, or rebase)
+        - Any remaining issues (if NOT_READY)
+        - Merge commit message suggestion (if APPROVED)""",
+        agent=pr_manager,
+        expected_output="Merge decision (APPROVED/NOT_READY), merge method recommendation, and merge commit message if approved"
+    )

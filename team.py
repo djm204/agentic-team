@@ -1028,8 +1028,209 @@ class ProjectCreationTeam:
                 if self.discord_streaming:
                     self.discord_streaming.on_stage_complete("PR Creation Phase", f"PR #{pr.number} created successfully")
                 
-                # Auto-merge if requested
-                if auto_merge:
+                # Step 6: PR Review and Feedback (if not auto-merging)
+                if not auto_merge:
+                    print("\n🔍 Step 6: Triggering PR review by agents...")
+                    
+                    if self.discord_streaming:
+                        self.discord_streaming.on_stage_start("PR Review Phase")
+                    
+                    # Get agents that should review the PR
+                    reviewing_agents = []
+                    if reviewer_record:
+                        reviewing_agents.append(("Code Reviewer", reviewer_record))
+                    if dev_record:
+                        reviewing_agents.append(("Senior Software Developer", dev_record))
+                    if qa_record:
+                        reviewing_agents.append(("QA Engineer & Test Specialist", qa_record))
+                    
+                    # Have each agent review the PR and leave comments
+                    for agent_name, agent_record in reviewing_agents:
+                        print(f"\n📝 {agent_name} reviewing PR...")
+                        
+                        if self.discord_streaming:
+                            self.discord_streaming.on_agent_start(agent_name, f"Reviewing PR #{pr.number}")
+                        
+                        # Create PR review task for this agent
+                        from tasks import create_pr_review_task
+                        pr_review_task = create_pr_review_task(
+                            pr_number=pr.number,
+                            pr_url=pr.html_url,
+                            pr_title=pr_info.get("title", "Project Implementation"),
+                            pr_body=pr_info.get("body", pr_data),
+                            agent=agent_record.agent,
+                            implementation=implementation if implementation else None,
+                            agent_name=agent_name,
+                            context_manager=self.context_manager
+                        )
+                        
+                        # Execute review
+                        from crewai import Crew, Process
+                        review_crew = Crew(
+                            agents=[agent_record.agent],
+                            tasks=[pr_review_task],
+                            process=Process.sequential,
+                            verbose=True
+                        )
+                        review_result = str(review_crew.kickoff())
+                        
+                        # Post comment to PR
+                        try:
+                            self.github_manager.add_pr_comment(
+                                pr_number=pr.number,
+                                comment=review_result,
+                                agent_name=agent_name
+                            )
+                            print(f"✅ {agent_name} posted review comment on PR #{pr.number}")
+                            
+                            if self.discord_streaming:
+                                self.discord_streaming.log_agent_action(
+                                    agent_name, "REVIEW", f"Posted review comment on PR #{pr.number}",
+                                    {"pr_url": pr.html_url, "comment_length": len(review_result)}
+                                )
+                        except Exception as comment_error:
+                            print(f"⚠️ Could not post comment from {agent_name}: {comment_error}")
+                    
+                    # Step 7: PR Manager reviews feedback and decides on merge
+                    print("\n🤔 Step 7: PR Manager evaluating feedback and merge readiness...")
+                    
+                    if self.discord_streaming:
+                        self.discord_streaming.on_agent_start("PR Manager", "Evaluating PR feedback and merge readiness")
+                    
+                    # Get all comments on the PR
+                    try:
+                        pr_comments = self.github_manager.get_pr_comments(pr.number)
+                        review_comments = self.github_manager.get_pr_review_comments(pr.number)
+                        
+                        # Format comments for merge decision task
+                        all_comments = []
+                        for comment in pr_comments:
+                            all_comments.append({
+                                "author": comment.user.login,
+                                "body": comment.body,
+                                "created_at": comment.created_at,
+                                "type": "comment"
+                            })
+                        for review_comment in review_comments:
+                            all_comments.append({
+                                "author": review_comment.user.login,
+                                "body": review_comment.body,
+                                "created_at": review_comment.created_at,
+                                "path": review_comment.path,
+                                "line": review_comment.line,
+                                "type": "review_comment"
+                            })
+                        
+                        # Check for unresolved feedback
+                        has_unresolved, unresolved_count, unresolved_list = self.github_manager.has_unresolved_feedback(pr.number)
+                        
+                        print(f"   Found {len(all_comments)} total comments, {unresolved_count} unresolved feedback items")
+                        
+                        # Create merge decision task
+                        from tasks import create_pr_merge_decision_task
+                        merge_decision_task = create_pr_merge_decision_task(
+                            pr_number=pr.number,
+                            pr_url=pr.html_url,
+                            pr_comments=all_comments,
+                            context_manager=self.context_manager
+                        )
+                        merge_decision_task.agent = pr_agent
+                        
+                        # Execute merge decision
+                        merge_crew = Crew(
+                            agents=[pr_agent],
+                            tasks=[merge_decision_task],
+                            process=Process.sequential,
+                            verbose=True
+                        )
+                        merge_decision = str(merge_crew.kickoff())
+                        
+                        # Parse merge decision
+                        merge_decision_lower = merge_decision.lower()
+                        should_merge = "approved" in merge_decision_lower and "merge" in merge_decision_lower
+                        should_merge = should_merge and "not_ready" not in merge_decision_lower
+                        
+                        if should_merge and not has_unresolved:
+                            print(f"\n✅ PR #{pr.number} approved for merge by PR Manager")
+                            
+                            # Extract merge method from decision (default to "merge")
+                            merge_method = "merge"
+                            if "squash" in merge_decision_lower:
+                                merge_method = "squash"
+                            elif "rebase" in merge_decision_lower:
+                                merge_method = "rebase"
+                            
+                            # Extract commit message if provided
+                            commit_message = None
+                            if "commit message" in merge_decision_lower or "merge message" in merge_decision_lower:
+                                # Try to extract message from decision text
+                                lines = merge_decision.split("\n")
+                                for i, line in enumerate(lines):
+                                    if "commit message" in line.lower() or "merge message" in line.lower():
+                                        if i + 1 < len(lines):
+                                            commit_message = lines[i + 1].strip()
+                                            break
+                            
+                            # Merge the PR
+                            print(f"🔄 Merging PR #{pr.number} using {merge_method} method...")
+                            
+                            if self.discord_streaming:
+                                self.discord_streaming.on_stage_start("PR Merge")
+                                self.discord_streaming.on_agent_start("PR Manager", f"Merging PR #{pr.number}")
+                            
+                            merged = self.github_manager.merge_pull_request(
+                                pr_number=pr.number,
+                                merge_method=merge_method,
+                                commit_message=commit_message
+                            )
+                            
+                            if merged:
+                                self.notification_manager.notify(
+                                    NotificationType.PR_MERGED,
+                                    {
+                                        "number": pr.number,
+                                        "url": pr.html_url
+                                    }
+                                )
+                                if self.discord_streaming:
+                                    self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
+                                    self.discord_streaming.on_agent_complete("PR Manager", f"Successfully merged PR #{pr.number}")
+                                print(f"✅ PR #{pr.number} merged successfully!")
+                                pr_info["merged"] = True
+                                pr_info["merge_method"] = merge_method
+                            else:
+                                print(f"⚠️ Failed to merge PR #{pr.number}. Check for conflicts or permissions.")
+                                pr_info["merge_attempted"] = True
+                                pr_info["merge_failed"] = True
+                        else:
+                            if has_unresolved:
+                                print(f"\n⏸️  PR #{pr.number} has {unresolved_count} unresolved feedback items. Merge deferred.")
+                                pr_info["merge_deferred"] = True
+                                pr_info["unresolved_feedback_count"] = unresolved_count
+                            else:
+                                print(f"\n⏸️  PR #{pr.number} not approved for merge by PR Manager.")
+                                pr_info["merge_deferred"] = True
+                                pr_info["merge_decision"] = merge_decision
+                            
+                            # Post merge decision comment
+                            try:
+                                decision_comment = f"**PR Manager Merge Decision:**\n\n{merge_decision}"
+                                self.github_manager.add_pr_comment(
+                                    pr_number=pr.number,
+                                    comment=decision_comment,
+                                    agent_name="PR Manager"
+                                )
+                            except Exception as comment_error:
+                                print(f"⚠️ Could not post merge decision comment: {comment_error}")
+                    
+                    except Exception as review_error:
+                        import traceback
+                        print(f"⚠️ Error during PR review/merge process: {review_error}")
+                        print(f"   Error details: {traceback.format_exc()[:300]}")
+                        pr_info["review_error"] = str(review_error)
+                
+                # Auto-merge if requested (original behavior)
+                elif auto_merge:
                     print("\n🔄 Auto-merging PR...")
                     if self.discord_streaming:
                         self.discord_streaming.on_stage_start("PR Merge")
