@@ -140,7 +140,8 @@ class ProjectCreationTeam:
         branch_name: str = None,
         auto_merge: bool = False,
         write_files: bool = False,
-        output_dir: str = "."
+        output_dir: str = ".",
+        dry_run: bool = False
     ):
         """
         Create a project from a manifesto with approval checkpoints and notifications.
@@ -153,10 +154,20 @@ class ProjectCreationTeam:
             auto_merge: Whether to automatically merge the PR after creation
             write_files: Whether to write files to disk from implementation
             output_dir: Directory to write files to (if write_files=True)
+            dry_run: If True, validate setup but skip actual execution
         
         Returns:
             Dictionary with project details, plan, implementation, and PR info
         """
+        # Dry-run mode: validate setup without executing
+        if dry_run:
+            return self._dry_run_validation(
+                manifesto=manifesto,
+                create_pr=create_pr,
+                branch_name=branch_name,
+                output_dir=output_dir
+            )
+        
         # If auto_approve is enabled, iterate until task is complete
         if self.auto_approve:
             return self._create_project_with_iteration(
@@ -177,6 +188,239 @@ class ProjectCreationTeam:
                 write_files=write_files,
                 output_dir=output_dir
             )
+    
+    def _dry_run_validation(
+        self,
+        manifesto: str,
+        create_pr: bool = True,
+        branch_name: str = None,
+        output_dir: str = "."
+    ):
+        """
+        Validate setup in dry-run mode without executing the workflow.
+        
+        Args:
+            manifesto: Project manifesto/requirements
+            create_pr: Whether PR creation would be enabled
+            branch_name: Branch name that would be used
+            output_dir: Output directory that would be used
+        
+        Returns:
+            Dictionary with validation results
+        """
+        print("\n" + "="*80)
+        print("DRY RUN VALIDATION")
+        print("="*80)
+        
+        validation_results = {
+            "dry_run": True,
+            "validations": {},
+            "errors": [],
+            "warnings": []
+        }
+        
+        # 1. Validate manifesto
+        print("\n✅ Validating manifesto...")
+        if not manifesto or len(manifesto.strip()) < 10:
+            validation_results["errors"].append("Manifesto is too short or empty")
+            print("   ❌ Manifesto validation failed")
+        else:
+            validation_results["validations"]["manifesto"] = "valid"
+            print(f"   ✅ Manifesto loaded ({len(manifesto)} characters)")
+        
+        # 2. Validate resource allocation
+        print("\n✅ Validating resource allocation...")
+        try:
+            from resource_allocator import ResourceAllocation, TaskType
+            allocation = ResourceAllocation.analyze_and_allocate(manifesto, create_pr)
+            task_type = allocation.get("task_type")
+            required_agents = allocation.get("required_agents", {})
+            required_phases = allocation.get("required_phases", {})
+            agent_count = allocation.get("agent_count", 0)
+            
+            validation_results["validations"]["resource_allocation"] = {
+                "task_type": task_type.value if task_type and hasattr(task_type, 'value') else "unknown",
+                "agent_count": agent_count,
+                "required_agents": {k: v for k, v in required_agents.items() if v},
+                "required_phases": {k: v for k, v in required_phases.items() if v}
+            }
+            print(f"   ✅ Task type: {task_type.value if task_type and hasattr(task_type, 'value') else 'Full Project'}")
+            print(f"   ✅ Required agents: {agent_count}")
+        except Exception as e:
+            validation_results["errors"].append(f"Resource allocation failed: {e}")
+            print(f"   ❌ Resource allocation failed: {e}")
+        
+        # 3. Validate output directory parsing
+        print("\n✅ Validating output directory...")
+        try:
+            output_dir_patterns = [
+                r'output_dir\s*[:=]\s*([^\s\n]+)',
+                r'output\s+directory\s*[:=]\s*([^\s\n]+)',
+                r'write\s+to\s*[:=]\s*([^\s\n]+)',
+                r'output\s*[:=]\s*([^\s\n]+)'
+            ]
+            
+            parsed_output_dir = None
+            for pattern in output_dir_patterns:
+                match = re.search(pattern, manifesto, re.IGNORECASE)
+                if match:
+                    parsed_output_dir = match.group(1).strip().strip('"').strip("'")
+                    break
+            
+            final_output_dir = parsed_output_dir if parsed_output_dir else output_dir
+            
+            # Resolve path
+            if final_output_dir == "." or final_output_dir == "./":
+                resolved_path = os.getcwd()
+            else:
+                if not os.path.isabs(final_output_dir):
+                    resolved_path = os.path.abspath(final_output_dir)
+                else:
+                    resolved_path = final_output_dir
+            
+            validation_results["validations"]["output_directory"] = {
+                "parsed": parsed_output_dir,
+                "final": final_output_dir,
+                "resolved": resolved_path,
+                "exists": os.path.exists(resolved_path),
+                "writable": os.access(os.path.dirname(resolved_path) if not os.path.exists(resolved_path) else resolved_path, os.W_OK)
+            }
+            print(f"   ✅ Output directory: {resolved_path}")
+            if not os.path.exists(resolved_path):
+                print(f"   ⚠️  Directory will be created: {resolved_path}")
+        except Exception as e:
+            validation_results["errors"].append(f"Output directory validation failed: {e}")
+            print(f"   ❌ Output directory validation failed: {e}")
+        
+        # 4. Validate GitHub configuration
+        print("\n✅ Validating GitHub configuration...")
+        github_config = {
+            "token_available": self.github_manager is not None and self.github_manager.token is not None,
+            "create_pr": create_pr
+        }
+        
+        if create_pr:
+            # Parse GitHub repo/owner from manifesto
+            repo_patterns = [
+                r'github_repo\s*[:=]\s*([^\s\n]+)',
+                r'github\s+repo\s*[:=]\s*([^\s\n]+)',
+                r'repo\s*[:=]\s*([^\s\n]+)',
+                r'repository\s*[:=]\s*([^\s\n]+)'
+            ]
+            
+            owner_patterns = [
+                r'github_owner\s*[:=]\s*([^\s\n]+)',
+                r'github\s+owner\s*[:=]\s*([^\s\n]+)',
+                r'owner\s*[:=]\s*([^\s\n]+)'
+            ]
+            
+            parsed_repo = None
+            parsed_owner = None
+            
+            for pattern in repo_patterns:
+                match = re.search(pattern, manifesto, re.IGNORECASE)
+                if match:
+                    parsed_repo = match.group(1).strip().strip('"').strip("'")
+                    break
+            
+            for pattern in owner_patterns:
+                match = re.search(pattern, manifesto, re.IGNORECASE)
+                if match:
+                    parsed_owner = match.group(1).strip().strip('"').strip("'")
+                    break
+            
+            github_config["parsed_repo"] = parsed_repo
+            github_config["parsed_owner"] = parsed_owner
+            
+            if not github_config["token_available"]:
+                validation_results["warnings"].append("GitHub token not available - PR creation will be skipped")
+                print("   ⚠️  GitHub token not available")
+            else:
+                print("   ✅ GitHub token available")
+            
+            if parsed_repo:
+                print(f"   ✅ Repository specified: {parsed_repo}")
+            if parsed_owner:
+                print(f"   ✅ Owner specified: {parsed_owner}")
+        
+        validation_results["validations"]["github"] = github_config
+        
+        # 5. Validate agent factories
+        print("\n✅ Validating agent factories...")
+        try:
+            from agents import (
+                create_project_manager_agent, create_developer_agent,
+                create_code_reviewer_agent, create_testing_agent, create_pr_manager_agent
+            )
+            agent_factories = {
+                "Project Manager": create_project_manager_agent,
+                "Developer": create_developer_agent,
+                "Code Reviewer": create_code_reviewer_agent,
+                "QA Engineer": create_testing_agent,
+                "PR Manager": create_pr_manager_agent
+            }
+            
+            available_agents = []
+            for name, factory in agent_factories.items():
+                try:
+                    # Just check if factory is callable, don't actually create agent
+                    if callable(factory):
+                        available_agents.append(name)
+                except:
+                    pass
+            
+            validation_results["validations"]["agents"] = {
+                "available": available_agents,
+                "count": len(available_agents)
+            }
+            print(f"   ✅ {len(available_agents)} agent factories available")
+        except Exception as e:
+            validation_results["errors"].append(f"Agent validation failed: {e}")
+            print(f"   ❌ Agent validation failed: {e}")
+        
+        # 6. Validate CrewAI availability
+        print("\n✅ Validating CrewAI availability...")
+        validation_results["validations"]["crewai"] = {
+            "available": CREWAI_AVAILABLE
+        }
+        if CREWAI_AVAILABLE:
+            print("   ✅ CrewAI is available")
+        else:
+            validation_results["warnings"].append("CrewAI not available - workflow will be limited")
+            print("   ⚠️  CrewAI not available")
+        
+        # 7. Validate branch name
+        if branch_name:
+            print(f"\n✅ Branch name: {branch_name}")
+            validation_results["validations"]["branch_name"] = branch_name
+        
+        # Summary
+        print("\n" + "="*80)
+        print("VALIDATION SUMMARY")
+        print("="*80)
+        print(f"✅ Validations passed: {len(validation_results['validations'])}")
+        if validation_results["errors"]:
+            print(f"❌ Errors: {len(validation_results['errors'])}")
+            for error in validation_results["errors"]:
+                print(f"   - {error}")
+        if validation_results["warnings"]:
+            print(f"⚠️  Warnings: {len(validation_results['warnings'])}")
+            for warning in validation_results["warnings"]:
+                print(f"   - {warning}")
+        
+        if not validation_results["errors"]:
+            print("\n✅ All validations passed! System is ready to execute.")
+        else:
+            print("\n❌ Some validations failed. Please fix errors before running.")
+        
+        return {
+            "dry_run": True,
+            "manifesto": manifesto[:200] + "..." if len(manifesto) > 200 else manifesto,
+            "validations": validation_results["validations"],
+            "errors": validation_results["errors"],
+            "warnings": validation_results["warnings"],
+            "ready": len(validation_results["errors"]) == 0
+        }
     
     def _create_project_single_pass(
         self,
@@ -668,14 +912,23 @@ pytest || exit 1
                     # Update github_manager with new repo
                     self.github_manager.set_repository(owner, repo_name)
                     
-                    # Add remote if local repo exists
+                    # Add or update remote if local repo exists
                     if self.git_manager.repo:
                         try:
-                            remote_url = repo.clone_url.replace('https://', f'https://{self.github_manager.token}@')
-                            self.git_manager.repo.create_remote('origin', remote_url)
-                            print(f"   ✅ Added remote 'origin' to local repository")
+                            # Format URL as github.com-{owner} for credential helper compatibility
+                            remote_url = f"https://github.com-{owner}@github.com/{owner}/{repo_name}.git"
+                            
+                            # Check if remote already exists
+                            if 'origin' in [r.name for r in self.git_manager.repo.remotes]:
+                                # Update existing remote URL
+                                self.git_manager.repo.remotes.origin.set_url(remote_url)
+                                print(f"   ✅ Updated remote 'origin' URL")
+                            else:
+                                # Create new remote
+                                self.git_manager.repo.create_remote('origin', remote_url)
+                                print(f"   ✅ Added remote 'origin' to local repository")
                         except Exception as e:
-                            print(f"   ⚠️ Could not add remote: {e}")
+                            print(f"   ⚠️ Could not add/update remote: {e}")
                     
                     print(f"   ✅ Created GitHub repository: {owner}/{repo_name}")
                     
@@ -1425,297 +1678,316 @@ pytest || exit 1
                     print(f"   Branch '{branch}' already exists on remote (from local push)")
                 
                 # Create the PR
-                pr = self.github_manager.create_pull_request(
-                    title=pr_info.get("title", "Project Implementation"),
-                    body=pr_info.get("body", pr_data),
-                    head=branch,
-                    base="main"
-                )
-                
-                pr_info.update({
-                    "number": pr.number,
-                    "url": pr.html_url,
-                    "branch": branch
-                })
-                
-                self.notification_manager.notify(
-                    NotificationType.PR_CREATED,
-                    {
+                try:
+                    pr = self.github_manager.create_pull_request(
+                        title=pr_info.get("title", "Project Implementation"),
+                        body=pr_info.get("body", pr_data),
+                        head=branch,
+                        base="main"
+                    )
+                    
+                    pr_info.update({
                         "number": pr.number,
                         "url": pr.html_url,
                         "branch": branch
+                    })
+                    
+                    self.notification_manager.notify(
+                        NotificationType.PR_CREATED,
+                        {
+                            "number": pr.number,
+                            "url": pr.html_url,
+                            "branch": branch
+                        }
+                    )
+                    
+                    print(f"\n✅ Pull request created: {pr.html_url}")
+                    
+                    if self.discord_streaming:
+                        self.discord_streaming.on_stage_complete("PR Creation Phase", f"PR #{pr.number} created successfully")
+                except Exception as pr_error:
+                    import traceback
+                    error_msg = f"Failed to create pull request: {pr_error}"
+                    print(f"\n❌ {error_msg}")
+                    print(f"   Error details: {traceback.format_exc()[:500]}")
+                    
+                    # Return error result - don't continue as if PR was created
+                    return {
+                        "error": error_msg,
+                        "pr_creation_failed": True,
+                        "plan": plan,
+                        "implementation": implementation,
+                        "review": review,
+                        "test_results": test_results,
+                        "files_created": created_files if write_files else [],
+                        "hurdles": {
+                            "plan": plan_hurdles,
+                            "implementation": impl_hurdles
+                        }
                     }
-                )
                 
-                print(f"\n✅ Pull request created: {pr.html_url}")
+                # Step 6: PR Review and Feedback (always run reviews when PR is created)
+                # Reviews are essential for quality - always run when PR is created
+                # auto_merge only controls whether PR is merged after reviews, not whether reviews happen
+                print("\n🔍 Step 6: Triggering PR review by agents...")
                 
                 if self.discord_streaming:
-                    self.discord_streaming.on_stage_complete("PR Creation Phase", f"PR #{pr.number} created successfully")
+                    self.discord_streaming.on_stage_start("PR Review Phase")
                 
-                # Step 6: PR Review and Feedback (always run reviews, even in auto_approve mode)
-                # Reviews are essential for quality - we only skip if explicitly auto-merging
-                if not auto_merge:
-                    print("\n🔍 Step 6: Triggering PR review by agents...")
+                # Get agents that should review the PR
+                # If agents weren't created in earlier phases, create them now for PR review
+                reviewing_agents = []
+                
+                # Ensure we have at least one reviewer - create agents if needed
+                if not reviewer_record and not dev_record and not qa_record:
+                    # No agents exist - create Code Reviewer as default reviewer
+                    print("   No agents available for PR review, creating Code Reviewer...")
+                    reviewer_agent = create_code_reviewer_agent(get_llm())
+                    reviewer_record = AgentRecord("Code Reviewer", reviewer_agent)
+                    self.standup_manager.register_agent("Code Reviewer", reviewer_agent)
+                    self.active_agents["Code Reviewer"] = reviewer_record
+                
+                if reviewer_record:
+                    reviewing_agents.append(("Code Reviewer", reviewer_record))
+                if dev_record:
+                    reviewing_agents.append(("Senior Software Developer", dev_record))
+                if qa_record:
+                    reviewing_agents.append(("QA Engineer & Test Specialist", qa_record))
+                
+                # Ensure we have at least one reviewer
+                if not reviewing_agents:
+                    print("⚠️ Warning: No agents available for PR review. Creating Code Reviewer...")
+                    reviewer_agent = create_code_reviewer_agent(get_llm())
+                    reviewer_record = AgentRecord("Code Reviewer", reviewer_agent)
+                    self.standup_manager.register_agent("Code Reviewer", reviewer_agent)
+                    self.active_agents["Code Reviewer"] = reviewer_record
+                    reviewing_agents.append(("Code Reviewer", reviewer_record))
+                
+                # Monitor context window before reviews
+                review_context_usage = self.context_manager.check_context_usage(
+                    pr_info.get("body", ""),
+                    implementation if implementation else ""
+                )
+                if review_context_usage["warning"]:
+                    print(f"⚠️ Context window usage before reviews: {review_context_usage['usage_percent']:.1f}%")
+                
+                # Have each agent review the PR and leave comments
+                for agent_name, agent_record in reviewing_agents:
+                    print(f"\n📝 {agent_name} reviewing PR...")
                     
                     if self.discord_streaming:
-                        self.discord_streaming.on_stage_start("PR Review Phase")
+                        self.discord_streaming.on_agent_start(agent_name, f"Reviewing PR #{pr.number}")
                     
-                    # Get agents that should review the PR
-                    reviewing_agents = []
-                    if reviewer_record:
-                        reviewing_agents.append(("Code Reviewer", reviewer_record))
-                    if dev_record:
-                        reviewing_agents.append(("Senior Software Developer", dev_record))
-                    if qa_record:
-                        reviewing_agents.append(("QA Engineer & Test Specialist", qa_record))
+                    # Create PR review task for this agent
+                    from tasks import create_pr_review_task
                     
-                    # Monitor context window before reviews
-                    review_context_usage = self.context_manager.check_context_usage(
-                        pr_info.get("body", ""),
-                        implementation if implementation else ""
+                    # Monitor and manage context for review task
+                    review_body = pr_info.get("body", pr_data)
+                    review_implementation = implementation if implementation else None
+                    if review_implementation:
+                        review_context_check = self.context_manager.check_context_usage(
+                            review_body, review_implementation
+                        )
+                        if review_context_check["warning"]:
+                            review_implementation = self.context_manager.summarize_for_context(
+                                review_implementation,
+                                max_tokens=self.context_manager.max_input_tokens // 3
+                            )
+                            print(f"   Summarized implementation for {agent_name} review")
+                    
+                    pr_review_task = create_pr_review_task(
+                        pr_number=pr.number,
+                        pr_url=pr.html_url,
+                        pr_title=pr_info.get("title", "Project Implementation"),
+                        pr_body=review_body,
+                        agent=agent_record.agent,
+                        implementation=review_implementation,
+                        agent_name=agent_name,
+                        context_manager=self.context_manager
                     )
-                    if review_context_usage["warning"]:
-                        print(f"⚠️ Context window usage before reviews: {review_context_usage['usage_percent']:.1f}%")
                     
-                    # Have each agent review the PR and leave comments
-                    for agent_name, agent_record in reviewing_agents:
-                        print(f"\n📝 {agent_name} reviewing PR...")
+                    # Execute review
+                    review_crew = Crew(
+                        agents=[agent_record.agent],
+                        tasks=[pr_review_task],
+                        process=Process.sequential,
+                        verbose=True
+                    )
+                    review_result = str(review_crew.kickoff())
+                    
+                    # Post comment to PR
+                    try:
+                        self.github_manager.add_pr_comment(
+                            pr_number=pr.number,
+                            comment=review_result,
+                            agent_name=agent_name
+                        )
+                        print(f"✅ {agent_name} posted review comment on PR #{pr.number}")
                         
                         if self.discord_streaming:
-                            self.discord_streaming.on_agent_start(agent_name, f"Reviewing PR #{pr.number}")
-                        
-                        # Create PR review task for this agent
-                        from tasks import create_pr_review_task
-                        
-                        # Monitor and manage context for review task
-                        review_body = pr_info.get("body", pr_data)
-                        review_implementation = implementation if implementation else None
-                        if review_implementation:
-                            review_context_check = self.context_manager.check_context_usage(
-                                review_body, review_implementation
+                            self.discord_streaming.log_agent_action(
+                                agent_name, "REVIEW", f"Posted review comment on PR #{pr.number}",
+                                {"pr_url": pr.html_url, "comment_length": len(review_result)}
                             )
-                            if review_context_check["warning"]:
-                                review_implementation = self.context_manager.summarize_for_context(
-                                    review_implementation,
-                                    max_tokens=self.context_manager.max_input_tokens // 3
-                                )
-                                print(f"   Summarized implementation for {agent_name} review")
+                    except Exception as comment_error:
+                        print(f"⚠️ Could not post comment from {agent_name}: {comment_error}")
+                
+                # Step 7: PR Manager reviews feedback and decides on merge
+                # This runs after all agents have reviewed the PR
+                print("\n🤔 Step 7: PR Manager evaluating feedback and merge readiness...")
+                
+                if self.discord_streaming:
+                    self.discord_streaming.on_agent_start("PR Manager", "Evaluating PR feedback and merge readiness")
+                
+                # Get all comments on the PR
+                try:
+                    pr_comments = self.github_manager.get_pr_comments(pr.number)
+                    review_comments = self.github_manager.get_pr_review_comments(pr.number)
+                    
+                    # Monitor context window for comments
+                    comments_text = "\n".join([c.body for c in pr_comments] + [c.body for c in review_comments])
+                    if comments_text:
+                        comments_context_usage = self.context_manager.check_context_usage(comments_text)
+                        if comments_context_usage["warning"]:
+                            print(f"⚠️ Context window usage for comments: {comments_context_usage['usage_percent']:.1f}%")
+                    
+                    # Format comments for merge decision task
+                    all_comments = []
+                    for comment in pr_comments:
+                        all_comments.append({
+                            "author": comment.user.login,
+                            "body": comment.body,
+                            "created_at": comment.created_at,
+                            "type": "comment"
+                        })
+                    for review_comment in review_comments:
+                        all_comments.append({
+                            "author": review_comment.user.login,
+                            "body": review_comment.body,
+                            "created_at": review_comment.created_at,
+                            "path": review_comment.path,
+                            "line": review_comment.line,
+                            "type": "review_comment"
+                        })
+                    
+                    # Check for unresolved feedback
+                    has_unresolved, unresolved_count, unresolved_list = self.github_manager.has_unresolved_feedback(pr.number)
+                    
+                    print(f"   Found {len(all_comments)} total comments, {unresolved_count} unresolved feedback items")
+                    
+                    # Create merge decision task
+                    from tasks import create_pr_merge_decision_task
+                    
+                    # Summarize comments if context window is getting full
+                    if len(all_comments) > 20:  # Many comments, might need summarization
+                        comments_summary = self.context_manager.summarize_for_context(
+                            "\n".join([c.get("body", "") for c in all_comments]),
+                            max_tokens=self.context_manager.max_input_tokens // 4
+                        )
+                        # Keep only most recent comments if too many
+                        all_comments = all_comments[-10:]  # Keep last 10 comments
+                    
+                    merge_decision_task = create_pr_merge_decision_task(
+                        pr_number=pr.number,
+                        pr_url=pr.html_url,
+                        pr_comments=all_comments,
+                        context_manager=self.context_manager
+                    )
+                    merge_decision_task.agent = pr_agent
+                    
+                    # Execute merge decision
+                    merge_crew = Crew(
+                        agents=[pr_agent],
+                        tasks=[merge_decision_task],
+                        process=Process.sequential,
+                        verbose=True
+                    )
+                    merge_decision = str(merge_crew.kickoff())
+                    
+                    # Parse merge decision
+                    merge_decision_lower = merge_decision.lower()
+                    should_merge = "approved" in merge_decision_lower and "merge" in merge_decision_lower
+                    should_merge = should_merge and "not_ready" not in merge_decision_lower
+                    
+                    if should_merge and not has_unresolved:
+                        print(f"\n✅ PR #{pr.number} approved for merge by PR Manager")
                         
-                        pr_review_task = create_pr_review_task(
+                        # Extract merge method from decision (default to "merge")
+                        merge_method = "merge"
+                        if "squash" in merge_decision_lower:
+                            merge_method = "squash"
+                        elif "rebase" in merge_decision_lower:
+                            merge_method = "rebase"
+                        
+                        # Extract commit message if provided
+                        commit_message = None
+                        if "commit message" in merge_decision_lower or "merge message" in merge_decision_lower:
+                            # Try to extract message from decision text
+                            lines = merge_decision.split("\n")
+                            for i, line in enumerate(lines):
+                                if "commit message" in line.lower() or "merge message" in line.lower():
+                                    if i + 1 < len(lines):
+                                        commit_message = lines[i + 1].strip()
+                                        break
+                        
+                        # Merge the PR
+                        print(f"🔄 Merging PR #{pr.number} using {merge_method} method...")
+                        
+                        if self.discord_streaming:
+                            self.discord_streaming.on_stage_start("PR Merge")
+                            self.discord_streaming.on_agent_start("PR Manager", f"Merging PR #{pr.number}")
+                        
+                        merged = self.github_manager.merge_pull_request(
                             pr_number=pr.number,
-                            pr_url=pr.html_url,
-                            pr_title=pr_info.get("title", "Project Implementation"),
-                            pr_body=review_body,
-                            agent=agent_record.agent,
-                            implementation=review_implementation,
-                            agent_name=agent_name,
-                            context_manager=self.context_manager
+                            merge_method=merge_method,
+                            commit_message=commit_message
                         )
                         
-                        # Execute review
-                        review_crew = Crew(
-                            agents=[agent_record.agent],
-                            tasks=[pr_review_task],
-                            process=Process.sequential,
-                            verbose=True
-                        )
-                        review_result = str(review_crew.kickoff())
+                        if merged:
+                            self.notification_manager.notify(
+                                NotificationType.PR_MERGED,
+                                {
+                                    "number": pr.number,
+                                    "url": pr.html_url
+                                }
+                            )
+                            if self.discord_streaming:
+                                self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
+                                self.discord_streaming.on_agent_complete("PR Manager", f"Successfully merged PR #{pr.number}")
+                            print(f"✅ PR #{pr.number} merged successfully!")
+                            pr_info["merged"] = True
+                            pr_info["merge_method"] = merge_method
+                        else:
+                            print(f"⚠️ Failed to merge PR #{pr.number}. Check for conflicts or permissions.")
+                            pr_info["merge_attempted"] = True
+                            pr_info["merge_failed"] = True
+                    else:
+                        if has_unresolved:
+                            print(f"\n⏸️  PR #{pr.number} has {unresolved_count} unresolved feedback items. Merge deferred.")
+                            pr_info["merge_deferred"] = True
+                            pr_info["unresolved_feedback_count"] = unresolved_count
+                        else:
+                            print(f"\n⏸️  PR #{pr.number} not approved for merge by PR Manager.")
+                            pr_info["merge_deferred"] = True
+                            pr_info["merge_decision"] = merge_decision
                         
-                        # Post comment to PR
+                        # Post merge decision comment
                         try:
+                            decision_comment = f"**PR Manager Merge Decision:**\n\n{merge_decision}"
                             self.github_manager.add_pr_comment(
                                 pr_number=pr.number,
-                                comment=review_result,
-                                agent_name=agent_name
+                                comment=decision_comment,
+                                agent_name="PR Manager"
                             )
-                            print(f"✅ {agent_name} posted review comment on PR #{pr.number}")
-                            
-                            if self.discord_streaming:
-                                self.discord_streaming.log_agent_action(
-                                    agent_name, "REVIEW", f"Posted review comment on PR #{pr.number}",
-                                    {"pr_url": pr.html_url, "comment_length": len(review_result)}
-                                )
                         except Exception as comment_error:
-                            print(f"⚠️ Could not post comment from {agent_name}: {comment_error}")
-                    
-                    # Step 7: PR Manager reviews feedback and decides on merge
-                    print("\n🤔 Step 7: PR Manager evaluating feedback and merge readiness...")
-                    
-                    if self.discord_streaming:
-                        self.discord_streaming.on_agent_start("PR Manager", "Evaluating PR feedback and merge readiness")
-                    
-                    # Get all comments on the PR
-                    try:
-                        pr_comments = self.github_manager.get_pr_comments(pr.number)
-                        review_comments = self.github_manager.get_pr_review_comments(pr.number)
-                        
-                        # Monitor context window for comments
-                        comments_text = "\n".join([c.body for c in pr_comments] + [c.body for c in review_comments])
-                        if comments_text:
-                            comments_context_usage = self.context_manager.check_context_usage(comments_text)
-                            if comments_context_usage["warning"]:
-                                print(f"⚠️ Context window usage for comments: {comments_context_usage['usage_percent']:.1f}%")
-                        
-                        # Format comments for merge decision task
-                        all_comments = []
-                        for comment in pr_comments:
-                            all_comments.append({
-                                "author": comment.user.login,
-                                "body": comment.body,
-                                "created_at": comment.created_at,
-                                "type": "comment"
-                            })
-                        for review_comment in review_comments:
-                            all_comments.append({
-                                "author": review_comment.user.login,
-                                "body": review_comment.body,
-                                "created_at": review_comment.created_at,
-                                "path": review_comment.path,
-                                "line": review_comment.line,
-                                "type": "review_comment"
-                            })
-                        
-                        # Check for unresolved feedback
-                        has_unresolved, unresolved_count, unresolved_list = self.github_manager.has_unresolved_feedback(pr.number)
-                        
-                        print(f"   Found {len(all_comments)} total comments, {unresolved_count} unresolved feedback items")
-                        
-                        # Create merge decision task
-                        from tasks import create_pr_merge_decision_task
-                        
-                        # Summarize comments if context window is getting full
-                        if len(all_comments) > 20:  # Many comments, might need summarization
-                            comments_summary = self.context_manager.summarize_for_context(
-                                "\n".join([c.get("body", "") for c in all_comments]),
-                                max_tokens=self.context_manager.max_input_tokens // 4
-                            )
-                            # Keep only most recent comments if too many
-                            all_comments = all_comments[-10:]  # Keep last 10 comments
-                        
-                        merge_decision_task = create_pr_merge_decision_task(
-                            pr_number=pr.number,
-                            pr_url=pr.html_url,
-                            pr_comments=all_comments,
-                            context_manager=self.context_manager
-                        )
-                        merge_decision_task.agent = pr_agent
-                        
-                        # Execute merge decision
-                        merge_crew = Crew(
-                            agents=[pr_agent],
-                            tasks=[merge_decision_task],
-                            process=Process.sequential,
-                            verbose=True
-                        )
-                        merge_decision = str(merge_crew.kickoff())
-                        
-                        # Parse merge decision
-                        merge_decision_lower = merge_decision.lower()
-                        should_merge = "approved" in merge_decision_lower and "merge" in merge_decision_lower
-                        should_merge = should_merge and "not_ready" not in merge_decision_lower
-                        
-                        if should_merge and not has_unresolved:
-                            print(f"\n✅ PR #{pr.number} approved for merge by PR Manager")
-                            
-                            # Extract merge method from decision (default to "merge")
-                            merge_method = "merge"
-                            if "squash" in merge_decision_lower:
-                                merge_method = "squash"
-                            elif "rebase" in merge_decision_lower:
-                                merge_method = "rebase"
-                            
-                            # Extract commit message if provided
-                            commit_message = None
-                            if "commit message" in merge_decision_lower or "merge message" in merge_decision_lower:
-                                # Try to extract message from decision text
-                                lines = merge_decision.split("\n")
-                                for i, line in enumerate(lines):
-                                    if "commit message" in line.lower() or "merge message" in line.lower():
-                                        if i + 1 < len(lines):
-                                            commit_message = lines[i + 1].strip()
-                                            break
-                            
-                            # Merge the PR
-                            print(f"🔄 Merging PR #{pr.number} using {merge_method} method...")
-                            
-                            if self.discord_streaming:
-                                self.discord_streaming.on_stage_start("PR Merge")
-                                self.discord_streaming.on_agent_start("PR Manager", f"Merging PR #{pr.number}")
-                            
-                            merged = self.github_manager.merge_pull_request(
-                                pr_number=pr.number,
-                                merge_method=merge_method,
-                                commit_message=commit_message
-                            )
-                            
-                            if merged:
-                                self.notification_manager.notify(
-                                    NotificationType.PR_MERGED,
-                                    {
-                                        "number": pr.number,
-                                        "url": pr.html_url
-                                    }
-                                )
-                                if self.discord_streaming:
-                                    self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
-                                    self.discord_streaming.on_agent_complete("PR Manager", f"Successfully merged PR #{pr.number}")
-                                print(f"✅ PR #{pr.number} merged successfully!")
-                                pr_info["merged"] = True
-                                pr_info["merge_method"] = merge_method
-                            else:
-                                print(f"⚠️ Failed to merge PR #{pr.number}. Check for conflicts or permissions.")
-                                pr_info["merge_attempted"] = True
-                                pr_info["merge_failed"] = True
-                        else:
-                            if has_unresolved:
-                                print(f"\n⏸️  PR #{pr.number} has {unresolved_count} unresolved feedback items. Merge deferred.")
-                                pr_info["merge_deferred"] = True
-                                pr_info["unresolved_feedback_count"] = unresolved_count
-                            else:
-                                print(f"\n⏸️  PR #{pr.number} not approved for merge by PR Manager.")
-                                pr_info["merge_deferred"] = True
-                                pr_info["merge_decision"] = merge_decision
-                            
-                            # Post merge decision comment
-                            try:
-                                decision_comment = f"**PR Manager Merge Decision:**\n\n{merge_decision}"
-                                self.github_manager.add_pr_comment(
-                                    pr_number=pr.number,
-                                    comment=decision_comment,
-                                    agent_name="PR Manager"
-                                )
-                            except Exception as comment_error:
-                                print(f"⚠️ Could not post merge decision comment: {comment_error}")
-                    
-                    except Exception as review_error:
-                        import traceback
-                        print(f"⚠️ Error during PR review/merge process: {review_error}")
-                        print(f"   Error details: {traceback.format_exc()[:300]}")
-                        pr_info["review_error"] = str(review_error)
+                            print(f"⚠️ Could not post merge decision comment: {comment_error}")
                 
-                # Auto-merge if explicitly requested (bypasses review)
-                elif auto_merge:
-                    print("\n🔄 Auto-merging PR (bypassing review)...")
-                    if self.discord_streaming:
-                        self.discord_streaming.on_stage_start("PR Merge")
-                    merged = self.github_manager.merge_pull_request(pr.number)
-                    if merged:
-                        self.notification_manager.notify(
-                            NotificationType.PR_MERGED,
-                            {
-                                "number": pr.number,
-                                "url": pr.html_url
-                            }
-                        )
-                        if self.discord_streaming:
-                            self.discord_streaming.on_stage_complete("PR Merge", f"PR #{pr.number} merged successfully")
-                        print("✅ PR merged successfully!")
-                        pr_info["merged"] = True
-                    else:
-                        print("⚠️ Auto-merge failed. Will retry in next iteration if auto_approve is enabled.")
-                        pr_info["merge_attempted"] = True
-                        pr_info["merge_failed"] = True
-                
+                except Exception as review_error:
+                    import traceback
+                    print(f"⚠️ Error during PR review/merge process: {review_error}")
+                    print(f"   Error details: {traceback.format_exc()[:300]}")
+                    pr_info["review_error"] = str(review_error)
+            
             except Exception as e:
                 print(f"⚠️ Error creating PR: {e}")
                 pr_info = {"error": str(e)}

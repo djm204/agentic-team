@@ -43,13 +43,14 @@ def load_manifesto(file_path: str = None) -> str:
     """
 
 
-def main(manifesto_file: str = None, auto_approve: bool = False):
+def main(manifesto_file: str = None, auto_approve: bool = False, dry_run: bool = False):
     """
     Create a project from a manifesto.
     
     Args:
         manifesto_file: Optional path to manifesto file. If None, uses example manifesto.
         auto_approve: If True, automatically approve all checkpoints (full auto-pilot mode).
+        dry_run: If True, validate initialization but skip actual execution.
     """
     
     # Load manifesto - you can provide a file path or use the default example
@@ -59,6 +60,9 @@ def main(manifesto_file: str = None, auto_approve: bool = False):
     else:
         manifesto = load_manifesto()  # Uses example manifesto
         print("📄 Using example manifesto (provide a file path to use your own)")
+    
+    if dry_run:
+        print("🔍 DRY RUN MODE: Validating setup without executing workflow...")
     
     if auto_approve:
         print("🤖 Auto-pilot mode enabled: All checkpoints will be automatically approved")
@@ -81,53 +85,74 @@ def main(manifesto_file: str = None, auto_approve: bool = False):
         enable_discord_streaming=True  # Enable real-time streaming to Discord
     )
     
-    # Generate branch name from manifesto (first line, sanitized)
+    # Generate branch name and project name from manifesto (first line, sanitized)
     import re
     first_line = manifesto.split('\n')[0].strip()[:50]
-    branch_suffix = re.sub(r'[^a-zA-Z0-9_-]', '-', first_line.lower()).strip('-')
-    if not branch_suffix:
-        branch_suffix = "project"
-    branch_name = f"feature/{branch_suffix}"
+    project_suffix = re.sub(r'[^a-zA-Z0-9_-]', '-', first_line.lower()).strip('-')
+    if not project_suffix:
+        project_suffix = "generated-project"
+    branch_name = f"feature/{project_suffix}"
+    
+    # Default output directory: create outside project root in its own independent folder
+    # Use parent directory to ensure it's outside the current repo
+    default_output_dir = f"../{project_suffix}"
+    
+    # Check if output_dir is specified in manifesto (will override this default)
+    # The team will parse it and use the manifesto value if present
     
     # Create project from manifesto
     # When --yes is provided, enable full automation including auto-merge
     result = team.create_project_from_manifesto(
         manifesto=manifesto,
-        create_pr=True,  # Set to False if you don't want to create a PR
+        create_pr=not dry_run,  # Skip PR creation in dry-run mode
         branch_name=branch_name,  # Auto-generated from manifesto
         auto_merge=False,  # Keep reviews even in auto_approve mode - only merge when all feedback addressed
-        write_files=True,  # Set to True to write files to disk
-        output_dir="./generated_project"  # Directory to write files
+        write_files=not dry_run,  # Skip file writing in dry-run mode
+        output_dir=default_output_dir,  # Default: outside project root in independent folder
+        dry_run=dry_run  # Pass dry-run flag
     )
     
     # Print results
-    print("\n" + "="*80)
-    print("PROJECT CREATION COMPLETE")
-    print("="*80)
-    print(f"\nPlan:\n{result['plan'][:500]}...")
-    print(f"\nImplementation:\n{result['implementation'][:500]}...")
-    
-    if result.get('pr'):
-        print(f"\nPull Request: {result['pr'].get('url', 'N/A')}")
-        print(f"PR Number: {result['pr'].get('number', 'N/A')}")
-    
-    if result.get('files_created'):
-        print(f"\nFiles Created: {len(result['files_created'])} files")
-        for file_path in result['files_created'][:10]:  # Show first 10
-            print(f"  - {file_path}")
-        if len(result['files_created']) > 10:
-            print(f"  ... and {len(result['files_created']) - 10} more")
-    
-    if result.get('test_results'):
-        print(f"\nTest Status: {'✅ Passed' if result.get('tests_passed') else '❌ Failed'}")
-    
-    if result.get('hurdles'):
-        plan_hurdles = result['hurdles'].get('plan', [])
-        impl_hurdles = result['hurdles'].get('implementation', [])
-        if plan_hurdles or impl_hurdles:
-            print(f"\nTechnical Hurdles Detected:")
-            print(f"  - Plan: {len(plan_hurdles)}")
-            print(f"  - Implementation: {len(impl_hurdles)}")
+    if result.get('dry_run'):
+        # Dry-run mode - validation results already printed
+        print("\n" + "="*80)
+        print("DRY RUN COMPLETE")
+        print("="*80)
+        if result.get('ready'):
+            print("\n✅ System is ready to execute. Run without --dry-run to proceed.")
+        else:
+            print("\n❌ System has validation errors. Please fix them before running.")
+    else:
+        # Normal execution results
+        print("\n" + "="*80)
+        print("PROJECT CREATION COMPLETE")
+        print("="*80)
+        if result.get('plan'):
+            print(f"\nPlan:\n{result['plan'][:500]}...")
+        if result.get('implementation'):
+            print(f"\nImplementation:\n{result['implementation'][:500]}...")
+        
+        if result.get('pr'):
+            print(f"\nPull Request: {result['pr'].get('url', 'N/A')}")
+            print(f"PR Number: {result['pr'].get('number', 'N/A')}")
+        
+        if result.get('files_created'):
+            print(f"\nFiles Created: {len(result['files_created'])} files")
+            for file_path in result['files_created'][:10]:  # Show first 10
+                print(f"  - {file_path}")
+            if len(result['files_created']) > 10:
+                print(f"  ... and {len(result['files_created']) - 10} more")
+        
+        if result.get('test_results'):
+            print(f"\nTest Status: {'✅ Passed' if result.get('tests_passed') else '❌ Failed'}")
+        
+        if result.get('hurdles'):
+            plan_hurdles = result['hurdles'].get('plan', [])
+            impl_hurdles = result['hurdles'].get('implementation', [])
+            if plan_hurdles or impl_hurdles:
+                print(f"\nTechnical Hurdles Detected:")
+                print(f"  - Plan: {len(plan_hurdles)}")
+                print(f"  - Implementation: {len(impl_hurdles)}")
     
     return result
 
@@ -185,8 +210,10 @@ Examples:
   python main.py manifesto.txt
   python main.py manifesto.txt --yes
   python main.py --yes manifesto.txt
+  python main.py manifesto.txt --dry-run
   
 The --yes flag enables auto-pilot mode, automatically approving all checkpoints.
+The --dry-run flag validates setup without executing the workflow.
         """
     )
     
@@ -204,10 +231,17 @@ The --yes flag enables auto-pilot mode, automatically approving all checkpoints.
         help="Auto-approve all checkpoints (full auto-pilot mode)"
     )
     
+    parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Dry run mode: validate setup without executing workflow"
+    )
+    
     args = parser.parse_args()
     
     # Run the main function with parsed arguments
-    main(manifesto_file=args.manifesto_file, auto_approve=args.yes)
+    main(manifesto_file=args.manifesto_file, auto_approve=args.yes, dry_run=args.dry_run)
     
     # Uncomment to try other examples:
     # example_create_pr_only()
